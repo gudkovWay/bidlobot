@@ -60,7 +60,7 @@ internal/
     gracekick/   daily tag->grace->kick lifecycle (idle: no seeding cmd)
     pending/     TTL-bound action store (legacy)
     captcha/     math challenge lifecycle + welcome animation
-    summarize/   RAM ring buffer + OMP/Pi runner
+    summarize/   RAM ring buffer + opt-in durable mirror + OMP/Pi runner
     referral/    referral matching/validation
     reputation/  balance economy rules
   games/           dice / battle / duel / guess / hangman / quiz ...
@@ -184,8 +184,18 @@ Side-effect axes:
 created idempotently in `storage.NewBoltStore`. `MigrateChatID`
 rekeys stats/members/chats/warnings/monthstats/dailystats/referrals;
 **known gap**: reputation, captcha, deferred_jobs, admission_attempts,
-gracekick and game leaderboards are NOT rekeyed on group->supergroup
-migration (documented, not silently handled).
+gracekick, game leaderboards and summarize rows are NOT rekeyed on
+group->supergroup migration (documented, not silently handled).
+
+**Second file: `summarize.db`.** The table above documents the MAIN
+database (`DB_PATH/bidlobot.db`). Summarize persistence (opt-in via
+`SUMMARIZE_PERSIST`, default off) writes to a SECOND, separate bbolt
+file, `DB_PATH/summarize.db`: bucket `summarize_msgs`, key
+`sm:<chat>:<seq>`, value JSON `{msg_id,user_id,name,ts,text}`. It is
+separate so member text never enters `bidlobot.db` and therefore
+never enters `backups/` (the backup job copies the main file whole;
+`scripts/backup.sh` is untouched). The file is created only when
+`SUMMARIZE_PERSIST` is on. See [45_summarize.md](45_summarize.md).
 
 ## Key invariants
 
@@ -236,6 +246,7 @@ No `edited_message`, no `chat_join_request`.
 | daily gracekick tick | `CLEANUP_DAILY_AT` UTC | idle (no seeding command) |
 | captcha sweep | min(timeout/3, 30s), >=5s | kicks unanswered challenges |
 | health server | - | /health + /version |
+| summarize persistence | flush 5s, prune 10m | opt-in (`SUMMARIZE_PERSIST`); batched bbolt writes to `summarize.db`; tracked in `App.inFlight`, final flush on shutdown |
 
 ## Failure handling
 
@@ -247,6 +258,8 @@ No `edited_message`, no `chat_join_request`.
 | retried media upload | `tgclient` media wrappers | file bodies are rewound before every attempt: telego streams the body into the multipart part once, so a retry reusing the reader would upload an empty part and Telegram would answer `400 file must be non-empty` - a class the ladder never retries |
 | hung Bot API call | `retry.Do` + `tgclient` | per-attempt deadline: 20s control, 240s media; no deadline from the caller still leaves the HTTP client's 65s read / 240s write bounds |
 | `migrate_to_chat_id` | `tgclient` | `MigrateChatID` + replay |
+| summarize persist flush fails | `summarize/persister.go` | rows re-queued in order, retried next tick (atomic txn: no drop/duplicate); Warn |
+| summarize restore fails/corrupt | `summarize/persister.go` | Warn; start with an empty window (never fatal) |
 | panic in any route | `App.recoverMiddleware` | log with stack; the process and the update loop survive |
 | bbolt I/O | service | propagate; reply "временная ошибка" |
 | TikTok download/audio fail | `tiktok_repost.go` | mirror first, yt-dlp fallback; both failed -> enqueue to deferred queue; original kept |

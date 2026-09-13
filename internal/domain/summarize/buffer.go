@@ -1,11 +1,12 @@
 // Package summarize keeps a bounded, RAM-only view of recent chat text
-// and turns a window of it into an LLM prompt. Nothing here is ever
-// persisted: the Telegram Bot API cannot replay history (no
-// getChatHistory; consumed updates are discarded within 24h - verified
-// against core.telegram.org/bots/api), so "summarize the last N" can
-// only ever mean "the last N this process has heard since it started",
-// and that is exactly what this buffer holds. A restart empties it by
-// design; raw member text never touches disk or the backup artifact.
+// and turns a window of it into an LLM prompt. The Telegram Bot API
+// cannot replay history (no getChatHistory; consumed updates are
+// discarded within 24h - verified against core.telegram.org/bots/api),
+// so "summarize the last N" can only ever mean "the last N this
+// process has heard". The RAM buffer is empty after a restart; optional
+// opt-in persistence (persister.go) keeps a durable copy in its own
+// bbolt file, and raw member text never touches the main database or
+// the backup artifact.
 package summarize
 
 import (
@@ -93,19 +94,68 @@ func (b *Buffer) Record(absChatID int64, e Entry) {
 	r.bytes += len(e.Text)
 	r.lastRecord = time.Now()
 
-	for len(r.entries) > b.maxPerChat || (r.bytes > b.maxBytesChat && len(r.entries) > 1) {
-		r.bytes -= len(r.entries[0].Text)
-		if r.bytes < 0 {
-			r.bytes = 0
-		}
-		r.entries = r.entries[1:]
-	}
+	b.enforceCapsLocked(r)
 	// Reclaim the backing array periodically so a long-lived high-churn
 	// chat does not pin an ever-growing slice header offset.
 	if len(r.entries) > 0 && cap(r.entries) > 4*b.maxPerChat {
 		compact := make([]Entry, len(r.entries))
 		copy(compact, r.entries)
 		r.entries = compact
+	}
+}
+
+// Seed appends restored entries to the chat's ring, enforcing the same
+// count and byte caps as Record (whole-chat restore can exceed them).
+// lastRecord is advanced to the newest seeded timestamp so cross-chat
+// LRU eviction compares real message recency, not restore order.
+func (b *Buffer) Seed(absChatID int64, entries []Entry) {
+	if len(entries) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	r := b.chats[absChatID]
+	if r == nil {
+		b.evictChatsLocked()
+		r = &ring{}
+		b.chats[absChatID] = r
+	}
+	for _, e := range entries {
+		if e.Text == "" {
+			continue
+		}
+		r.entries = append(r.entries, e)
+		r.bytes += len(e.Text)
+		if e.TS.After(r.lastRecord) {
+			r.lastRecord = e.TS
+		}
+	}
+	if len(r.entries) == 0 {
+		// Every entry was empty-text; do not leave an empty ring behind.
+		delete(b.chats, absChatID)
+		return
+	}
+	b.enforceCapsLocked(r)
+}
+
+// Caps reports the configured limits so the pruner that owns the disk
+// copy enforces the same bounds as the ring.
+func (b *Buffer) Caps() (maxPerChat, maxBytesChat, maxChats int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.maxPerChat, b.maxBytesChat, b.maxChats
+}
+
+// enforceCapsLocked evicts oldest entries until both the count and byte
+// caps hold. Caller holds b.mu.
+func (b *Buffer) enforceCapsLocked(r *ring) {
+	for len(r.entries) > b.maxPerChat || (r.bytes > b.maxBytesChat && len(r.entries) > 1) {
+		r.bytes -= len(r.entries[0].Text)
+		if r.bytes < 0 {
+			r.bytes = 0
+		}
+		r.entries = r.entries[1:]
 	}
 }
 

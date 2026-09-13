@@ -68,6 +68,10 @@ type Service struct {
 	gcalls       []time.Time // attempt timestamps in the rolling window
 
 	cache *cache
+
+	// persist is the durable-window writer; nil means persistence is
+	// off (default) and every persistence method is a no-op.
+	persist *Persister
 }
 
 func NewService(buf *Buffer, llm *PiRunner, cfg Config, log *slog.Logger) *Service {
@@ -147,7 +151,55 @@ func (s *Service) GlobalAllow() bool {
 }
 
 // Record ingests one human message into the live window.
-func (s *Service) Record(absChatID int64, e Entry) { s.buf.Record(absChatID, e) }
+func (s *Service) Record(absChatID int64, e Entry) {
+	s.buf.Record(absChatID, e)
+	if s.persist != nil {
+		s.persist.Append(absChatID, e)
+	}
+}
+
+// EnablePersistence turns on the durable window: Record then also queues
+// the entry for the batched write to store. Call once, before Run.
+func (s *Service) EnablePersistence(store Store, cfg PersistConfig) {
+	if store == nil {
+		return
+	}
+	s.persist = NewPersister(store, s.buf, cfg, s.log)
+}
+
+// PersistenceEnabled reports whether the durable window is on.
+func (s *Service) PersistenceEnabled() bool { return s.persist != nil }
+
+// RestorePersistence hydrates the RAM window from the store. Call at
+// startup BEFORE the update loop starts so live messages keep arriving
+// after the restored ones (Seed appends, so order matters). A failure
+// is logged and non-fatal: the bot keeps running without history.
+func (s *Service) RestorePersistence(ctx context.Context) {
+	if s.persist == nil {
+		return
+	}
+	if err := s.persist.Restore(ctx); err != nil {
+		s.log.Warn("summarize restore failed; starting without history", "error", err)
+	}
+}
+
+// RunPersistence blocks until ctx is done, flushing every
+// PersistConfig.FlushInterval and pruning every PruneInterval.
+func (s *Service) RunPersistence(ctx context.Context) {
+	if s.persist == nil {
+		return
+	}
+	s.persist.Run(ctx)
+}
+
+// FlushPersistence writes the queued rows synchronously. No-op when
+// persistence is off. The shutdown path calls this after in-flight work
+// has settled and before the store is closed.
+func (s *Service) FlushPersistence() {
+	if s.persist != nil {
+		s.persist.Flush()
+	}
+}
 
 // Available reports how many messages are currently in the live window.
 func (s *Service) Available(absChatID int64) int {

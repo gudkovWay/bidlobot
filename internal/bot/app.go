@@ -315,6 +315,16 @@ func (a *App) Run(ctx context.Context, statsH *stats.Handler) error {
 			a.runCaptchaSweep(ctx, interval)
 		}()
 	}
+	if a.summarize != nil && a.summarize.PersistenceEnabled() {
+		// Tracked in inFlight: the persister batches window writes into
+		// its own bbolt file, so Stop must wait for the final flush
+		// (RunPersistence flushes on ctx.Done) before the store closes.
+		a.inFlight.Add(1)
+		go func() {
+			defer a.inFlight.Done()
+			a.summarize.RunPersistence(ctx)
+		}()
+	}
 
 	if a.healthServer != nil {
 		a.healthServer.Start()
@@ -462,7 +472,8 @@ func nextDailyRun(now time.Time, atMin int) time.Time {
 //  1. Tell the long-poll loop to stop accepting new updates (handler.StopWithContext).
 //  2. Wait for in-flight handlers up to ShutdownTimeout.
 //  3. Flush the stats buffer.
-//  4. Stop the health listener.
+//  4. Flush the summarize persistence queue (no-op when disabled).
+//  5. Stop the health listener.
 //
 // The order matters: in-flight handlers may still write to the stats
 // buffer, so flushing must happen after they have settled.
@@ -491,6 +502,10 @@ func (a *App) Stop() {
 	a.statsBuffer.Flush()
 	if a.monthBuffer != nil {
 		a.monthBuffer.Flush()
+	}
+
+	if a.summarize != nil {
+		a.summarize.FlushPersistence()
 	}
 
 	if a.healthServer != nil {

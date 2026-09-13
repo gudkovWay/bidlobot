@@ -144,6 +144,14 @@ Optional:
   legacy gracekick tuning, still validated, **but the scheduler is
   idle** (no `/cleanup` command exists to seed a campaign). Harmless
   to keep or drop.
+- `SUMMARIZE_PERSIST` (default **off**) / `SUMMARIZE_PERSIST_TTL`
+  (default `168h`, valid only when the flag is on, range 1h..720h) --
+  opt-in durable mirror of the summarize RAM window. When on, raw
+  member message text is written to `DB_PATH/summarize.db` (created
+  on demand) - a SECOND bbolt file, deliberately NOT `bidlobot.db`,
+  so the main DB and its backups stay text-free. `TTL` bounds the
+  prune horizon and the restore cutoff. See
+  [45_summarize.md](45_summarize.md).
 
 Removed env (no longer read; stale values are ignored): `GLM_API_KEY`,
 `GLM_BASE_URL`, `GLM_MODEL`, `RECORD_UPDATES`, `CLEANUP_DAILY_ENABLED`,
@@ -253,6 +261,12 @@ Default destination `/var/backups/bidlobot/...`, configurable via
 `BIDLOBOT_BACKUP_DIR`; 7 files kept. Failed runs exit nonzero so cron
 alerts.
 
+`summarize.db` (present only when `SUMMARIZE_PERSIST=1`) is
+intentionally NOT covered by the backup job: the scripts copy
+`bidlobot.db` whole, and the mirror exists so member text never
+reaches the backed-up file. It is rebuilt organically from live
+traffic after a restore.
+
 **Status 2026-09-12**: no cron entry had ever been installed and no
 backup existed. The first consistent snapshot was taken by hand with
 the `docker cp` recipe above (2097152 bytes, bbolt page magic
@@ -272,8 +286,11 @@ redacts; never enable `WithDebug`), `DEEPSEEK_API_KEY` (the omp CLI
 reads it from env; the Go binary never logs it), message text (only
 chat_id/user_id/command/duration_ms). The `/summarize` feature *sends*
 recent message text to the external DeepSeek provider via omp (privacy
-note in [45_summarize.md](45_summarize.md)) but never writes it to
-disk or logs (memfd transcript, no temp file).
+note in [45_summarize.md](45_summarize.md)). With
+`SUMMARIZE_PERSIST=1` member text IS written to disk - to the
+separate `summarize.db`, never to the main DB or its backups. It never
+logs message text (memfd transcript, no temp file on the provider
+path).
 
 ## CI
 

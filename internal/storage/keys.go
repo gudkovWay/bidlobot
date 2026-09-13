@@ -155,3 +155,15 @@ func ReferralPrefix(absChatID int64) []byte { return keyf("rf:%020d:", absChatID
 func TikTokVideoKey(chatID int64, videoID string) []byte {
 	return keyf("tv:%020d:%s", AbsChatID(chatID), videoID)
 }
+
+// SummarizeMsgKey is one persisted /summarize window row in the
+// separate summarize.db file (never bidlobot.db). The chat id leads so
+// a prefix scan returns one chat's window in append order; seq is the
+// bucket's monotonic sequence (NextSequence) zero-padded so the
+// lexicographic cursor order equals the numeric one.
+func SummarizeMsgKey(absChatID int64, seq uint64) []byte {
+	return keyf("sm:%020d:%020d", absChatID, seq)
+}
+
+// SummarizeChatPrefix scans one chat's persisted window.
+func SummarizeChatPrefix(absChatID int64) []byte { return keyf("sm:%020d:", absChatID) }

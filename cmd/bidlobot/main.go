@@ -166,6 +166,20 @@ func main() {
 		log.Error("Pi binary unavailable")
 		os.Exit(1)
 	}
+	if cfg.SummarizePersist {
+		// Own file, own bolt handle: the backup job copies bidlobot.db
+		// whole, so member text must not live there.
+		summarizeRepo, perr := storage.NewSummarizeRepo(filepath.Join(cfg.DBPath, "summarize.db"))
+		if perr != nil {
+			log.Error("open summarize store", "error", perr)
+			os.Exit(1)
+		}
+		defer summarizeRepo.Close()
+		summarizeSvc.EnablePersistence(summarizeRepo, summarize.PersistConfig{TTL: cfg.SummarizePersistTTL})
+		log.Info("summarize persistence enabled", "ttl", cfg.SummarizePersistTTLRaw, "file", filepath.Join(cfg.DBPath, "summarize.db"))
+	} else {
+		log.Info("summarize persistence disabled (RAM-only window)")
+	}
 	log.Info("chat summarization enabled")
 	// tgClient (rate-limited + retried) is the public-surface sender:
 	// help, onboarding - same budget as games/stats so a busy chat stays
@@ -268,6 +282,10 @@ func main() {
 
 	summarizeSvc.SetAppContext(ctx)
 	summarizeSvc.AttachWaitGroup(app.InFlight())
+
+	// Synchronous: the window must be hydrated before the long-poll loop
+	// starts recording, or a live message would be seeded after older ones.
+	summarizeSvc.RestorePersistence(ctx)
 
 	go func() {
 		if err := app.Run(ctx, statsHandler); err != nil {

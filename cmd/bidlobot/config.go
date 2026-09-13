@@ -52,6 +52,15 @@ type Config struct {
 	InstagramProxy   string
 	InstagramCookies string
 
+	// Opt-in durable window for /summarize: when on, the RAM ring is
+	// mirrored into its own bbolt file (DB_PATH/summarize.db) so a restart
+	// does not empty the transcript. Off by default: raw member text on
+	// disk is a deliberate operator decision, and the main database and
+	// its backups stay text-free.
+	SummarizePersist       bool
+	SummarizePersistTTLRaw string
+	SummarizePersistTTL    time.Duration
+
 	// Required: the Telegram user id of the bot owner. Only this user may
 	// add the bot to a supergroup; any non-owner add triggers an immediate
 	// LeaveChat. Must be a positive int64. Zero rejects all admission.
@@ -78,6 +87,9 @@ func loadConfig() Config {
 	captchaTimeoutRaw := envOr("CAPTCHA_TIMEOUT", "1m")
 	captchaTimeout, _ := time.ParseDuration(captchaTimeoutRaw)
 
+	persistTTLRaw := envOr("SUMMARIZE_PERSIST_TTL", "168h")
+	persistTTL, _ := time.ParseDuration(persistTTLRaw)
+
 	return Config{
 		Token:    os.Getenv("TG_BOT_TOKEN"),
 		DBPath:   envOr("DB_PATH", "./data"),
@@ -95,7 +107,10 @@ func loadConfig() Config {
 		InstagramProxy:   envOr("INSTAGRAM_PROXY", ""),
 		InstagramCookies: envOr("INSTAGRAM_COOKIES", ""),
 
-		BotOwnerID: parseOwnerID(os.Getenv("BOT_OWNER_ID")),
+		SummarizePersist:       envBool("SUMMARIZE_PERSIST", false),
+		SummarizePersistTTLRaw: persistTTLRaw,
+		SummarizePersistTTL:    persistTTL,
+		BotOwnerID:             parseOwnerID(os.Getenv("BOT_OWNER_ID")),
 
 		CaptchaEnabled:    envBool("CAPTCHA_ENABLED", false),
 		CaptchaTimeoutRaw: captchaTimeoutRaw,
@@ -204,6 +219,19 @@ func (c Config) Validate() error {
 			errs = append(errs, fmt.Errorf("CAPTCHA_TIMEOUT: invalid duration %q", c.CaptchaTimeoutRaw))
 		case c.CaptchaTimeout < time.Minute || c.CaptchaTimeout > 30*time.Minute:
 			errs = append(errs, fmt.Errorf("CAPTCHA_TIMEOUT: must be 1m..30m, got %q", c.CaptchaTimeoutRaw))
+		}
+	}
+
+	if c.SummarizePersist {
+		// SummarizePersistTTL is parsed in loadConfig; a zero value means
+		// the raw string did not parse. Range 1h..720h mirrors the
+		// CLEANUP_GRACE window: long enough to survive a restart, short
+		// enough that raw member text does not linger on disk.
+		switch {
+		case c.SummarizePersistTTL <= 0:
+			errs = append(errs, fmt.Errorf("SUMMARIZE_PERSIST_TTL: invalid duration %q", c.SummarizePersistTTLRaw))
+		case c.SummarizePersistTTL < time.Hour || c.SummarizePersistTTL > 720*time.Hour:
+			errs = append(errs, fmt.Errorf("SUMMARIZE_PERSIST_TTL: must parse to 1h..720h, got %q", c.SummarizePersistTTLRaw))
 		}
 	}
 
