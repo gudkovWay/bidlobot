@@ -187,6 +187,33 @@ func TestLoadConfig_ReadsEnv(t *testing.T) {
 	}
 }
 
+// The durable summarize window writes raw member text to disk, so the
+// default posture (flag unset) must stay off: flipping it silently would
+// change the documented privacy contract of every deployment.
+func TestLoadConfig_SummarizePersistDefaultsOff(t *testing.T) {
+	t.Setenv("SUMMARIZE_PERSIST", "")
+	t.Setenv("SUMMARIZE_PERSIST_TTL", "")
+
+	off := loadConfig()
+	if off.SummarizePersist {
+		t.Error("SummarizePersist default = true, want false")
+	}
+	if off.SummarizePersistTTL != 168*time.Hour || off.SummarizePersistTTLRaw != "168h" {
+		t.Errorf("TTL default = %v (%q), want 168h", off.SummarizePersistTTL, off.SummarizePersistTTLRaw)
+	}
+
+	t.Setenv("SUMMARIZE_PERSIST", "1")
+	t.Setenv("SUMMARIZE_PERSIST_TTL", "24h")
+
+	on := loadConfig()
+	if !on.SummarizePersist {
+		t.Error("SUMMARIZE_PERSIST=1 did not enable persistence")
+	}
+	if on.SummarizePersistTTL != 24*time.Hour {
+		t.Errorf("TTL = %v, want 24h", on.SummarizePersistTTL)
+	}
+}
+
 // Ensure errors.Join is in use so we get one error per problem.
 func TestConfig_AggregateUsesErrorsJoin(t *testing.T) {
 	c := Config{Token: "", DBPath: "", LogLevel: "x"}
