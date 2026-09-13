@@ -5,10 +5,11 @@ touches:
   - internal/bot/summarize.go
   - internal/bot/deferred.go
   - internal/domain/summarize/
+  - internal/domain/summarize/persister.go
   - internal/storage/deferred_repo.go
+  - internal/storage/summarize_repo.go
 written: 2026-05-15
-updated: 2026-05-16
----
+updated: 2026-09-13
 
 # Chat summarization (`/summarize`)
 
@@ -29,22 +30,70 @@ not retroactive history. This is inherent, not a TODO. Combined with
 the privacy model, the recorder fills only when the bot sees message
 content (privacy OFF).
 
-## Storage model: RAM-only ring buffer
+Persistence (`SUMMARIZE_PERSIST`, below) means a restart no longer
+empties that window; it still does NOT provide retroactive history.
 
-`internal/domain/summarize.Buffer`. Per-chat ring, **never persisted**:
-not in bbolt, not in backups, gone on restart by design. Raw member
-text never touches disk. Bounds: 2000 msgs/chat, 4 MiB text/chat, 256
-distinct chats (LRU-evicted), oldest-evicted on overflow.
+## Storage model: RAM ring + opt-in durable mirror
 
-Fed by a passive middleware (`summarizeRecorder`) mirroring the stats
-predicate exactly (non-bot, not anonymous admin, no `sender_chat`, has
-text/caption), additionally skipping the bot's own `/`-commands so a
-`/summarize` never pollutes the next transcript. Registered among the
-passive observers BEFORE the sanitizer/repost middlewares so it sees
-the original human message.
+Two tiers, one read path:
 
-## Invocation & authorization
+- **RAM ring** (`internal/domain/summarize.Buffer`) - unchanged and
+  still the ONLY read path. Per-chat ring: 2000 msgs/chat, 4 MiB
+  text/chat, 256 distinct chats (LRU-evicted), oldest-evicted on
+  overflow. Summaries are always built from this in-memory window.
+- **Disk mirror** (`internal/storage/summarize_repo.go` +
+  `internal/domain/summarize/persister.go`) - an OPT-IN durable copy
+  of the same rows in a separate bbolt file. It never feeds a summary
+  directly; it only re-seeds the RAM ring after a restart (below).
 
+The Telegram constraint is unchanged: the Bot API cannot read history
+(see "Hard constraint" above), so the window remains forward-only
+from the first message the bot heard. Persistence removes the
+**restart volatility** - a redeploy or crash no longer empties the
+window - but it does NOT provide retroactive history.
+
+### The durable mirror
+
+Exists only when `SUMMARIZE_PERSIST=1` (default OFF).
+
+- **File**: `DB_PATH/summarize.db` - deliberately a SECOND bbolt
+  file, not a bucket in `bidlobot.db`, so member text never enters the
+  main database and therefore never enters `backups/` (the backup job
+  copies the main file whole; `scripts/backup.sh` is untouched).
+  Created on demand.
+- **Shape**: bucket `summarize_msgs`, key
+  `sm:<absChatID, %020d>:<seq, %020d>` (`seq` from `bkt.NextSequence()`),
+  value JSON `{msg_id, user_id, name, ts, text}` - the chat id lives
+  in the key, not the value.
+- **Writes** (`Service.Record` -> persister): the recorder middleware
+  fills the RAM ring and queues a row; rows are flushed in ONE bbolt
+  transaction every 5s (`FlushInterval`, one fsync per batch instead
+  of one per message), force-flushed on a burst of 500 queued rows
+  (`QueueLimit`), and flushed a final time when the app context is
+  cancelled. `App.Stop()` calls `FlushPersistence()` after
+  `inFlight.Wait()` and before the DB is closed, so a SIGTERM
+  shutdown loses nothing. A failed `AppendRows` re-queues the rows in
+  order and retries on the next tick - no row is dropped or
+  duplicated (the bbolt transaction is atomic).
+- **Prune** (every 10m, `PruneInterval`): enforces the SAME caps as
+  the RAM ring - entries older than TTL, per-chat 2000 messages,
+  per-chat 4 MiB, 256 chats (LRU by newest message time). A single
+  oversized message is still kept.
+- **Restore**: at startup, synchronously BEFORE the long-poll loop
+  starts (a live message can never be seeded after older ones). Rows
+  newer than `now - TTL` are grouped per chat and seeded through
+  `Buffer.Seed`, which re-applies the RAM caps. One Info line:
+  `summarize window restored` with `chats`, `rows`, `cutoff`. A
+  failure logs a Warn and the bot keeps running without history - a
+  corrupt window is never fatal.
+
+### Mirror configuration
+
+- `SUMMARIZE_PERSIST` - bool, default **OFF**. With the default, the
+  documented RAM-only posture is exactly as before.
+- `SUMMARIZE_PERSIST_TTL` - duration, default `168h` (7 days),
+  validated only when the flag is on; range 1h..720h. Bounds both the
+  prune horizon and the restore cutoff.
 - Public supergroup command `/summarize [N] [questions...]`, alias
   `/итог`. The alias is matched by `textCommandPredicate`, not
   `th.CommandEqual` (ASCII-only RE2 - never matches Cyrillic).
@@ -151,18 +200,34 @@ placeholder stays up. The requester runs `/flush` to retry
 
 `/summarize` sends recent member message text to an external provider
 (DeepSeek) over TLS via the omp CLI. Deliberate, owner-approved
-tradeoff for one admin-only feature, mitigated by: RAM-only window (no
-disk/backup), explicit in-message provenance + cost footer, key never
-seen/logged by the bot, memfd transcript (no temp file). Operators
-should disclose this to their community. The recorder needs privacy
-OFF to see message content.
+tradeoff for one admin-only feature, mitigated by: explicit in-message
+provenance + cost footer, key never seen/logged by the bot, memfd
+transcript (no temp file). Operators should disclose this to their
+community. The recorder needs privacy OFF to see message content.
+
+Text on disk is flag-conditional: with `SUMMARIZE_PERSIST=1` raw
+member message text IS written to disk - but only to the separate
+`summarize.db` file, so the main DB (`bidlobot.db`) and its backups
+stay text-free. Default OFF, so the default posture is unchanged.
+The persister logs counts/ids only - the "never log message text"
+rule is untouched.
 
 ## Documented limitations (v1)
 
-1. **Forward-only / restart-volatile.** Only messages heard since
-   process start; redeploy/crash empties the window.
-2. **Edits & deletions not tracked.** No `edited_message` subscription;
+1. **Forward-only.** Only messages heard since process start; not
+   retroactive. Restart-volatility is conditional on
+   `SUMMARIZE_PERSIST` (default OFF empties the window on restart;
+   ON survives a graceful restart, see the durable mirror above).
+2. **Summarize rows are NOT rekeyed on a group->supergroup
+   migration** (`MigrateChatID` skips them), same as
+   reputation/captcha/deferred_jobs/admission_attempts/gracekick/game
+   leaderboards ([60_architecture.md](60_architecture.md)).
+3. **A hard power loss can lose up to one flush interval (5s)** of
+   queued rows; a SIGTERM restart (systemd/deploy) loses nothing
+   (final flush before DB close). The window remains bounded by TTL
+   and the caps.
+4. **Edits & deletions not tracked.** No `edited_message` subscription;
    deleted messages stay in the window until evicted.
-3. **Anonymous admins cannot invoke** (no identifiable `From.ID`).
-4. **Times are MSK** in the transcript and footer (no per-chat tz).
-5. **Process-wide budget** (40/h) can throttle legit multi-chat use.
+5. **Anonymous admins cannot invoke** (no identifiable `From.ID`).
+6. **Times are MSK** in the transcript and footer (no per-chat tz).
+7. **Process-wide budget** (40/h) can throttle legit multi-chat use.

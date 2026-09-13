@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const validToken = "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef-_AA"
@@ -57,6 +58,47 @@ func TestConfig_RejectsBadLogLevel(t *testing.T) {
 	err := c.Validate()
 	if err == nil || !strings.Contains(err.Error(), "LOG_LEVEL") {
 		t.Fatalf("expected LOG_LEVEL error, got %v", err)
+	}
+}
+
+func TestConfig_RejectsBadSummarizePersistTTL(t *testing.T) {
+	dir := t.TempDir()
+	cases := []string{
+		"banana", // unparseable
+		"30m",    // below the 1h floor
+		"1000h",  // above the 720h ceiling
+	}
+	for _, ttl := range cases {
+		t.Run(ttl, func(t *testing.T) {
+			c := Config{
+				Token:                  validToken,
+				DBPath:                 dir,
+				LogLevel:               "info",
+				BotOwnerID:             123456789,
+				SummarizePersist:       true,
+				SummarizePersistTTLRaw: ttl,
+			}
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), "SUMMARIZE_PERSIST_TTL") {
+				t.Fatalf("ttl %q expected SUMMARIZE_PERSIST_TTL error, got %v", ttl, err)
+			}
+		})
+	}
+}
+
+func TestConfig_AcceptsValidSummarizePersistTTL(t *testing.T) {
+	dir := t.TempDir()
+	c := Config{
+		Token:                  validToken,
+		DBPath:                 dir,
+		LogLevel:               "info",
+		BotOwnerID:             123456789,
+		SummarizePersist:       true,
+		SummarizePersistTTLRaw: "168h",
+		SummarizePersistTTL:    168 * time.Hour,
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("expected valid: %v", err)
 	}
 }
 
