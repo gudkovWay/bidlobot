@@ -1,135 +1,138 @@
-# Handoff - 2026-09-12 (media resilience session)
+# Handoff - 2026-09-13 (summarize persistence session)
 
 ## 1. State (what is true right now)
 
-- **Deployed.** `origin/master` = `631cb23` ("fix(resilience): contain
-  panics, retry transport faults, fetch TikTok via mirror"). Production
-  (`veschin@192.168.0.101`, checkout `~/bidlobot`) was recreated from it
-  and verified: container `running healthy`, `/health` -> `200
-  {"status":"ok"}`, one `"msg":"starting"` entry in the window, zero
-  ERROR lines, log sequence `starting` -> `captcha enabled` -> `health
-  server listening` -> `bot started, polling for updates`.
-- Working tree clean; docs and devlog are in the same commit
-  (`devlog/10_media_resilience.md`).
-- **P1** `App.recoverMiddleware` is the outermost handler in `Run`
-  (panics become `update handler panic recovered` + stack); `shared.Go`
-  wraps the fire-and-forget spawns (flush, tiktok, tiktok-comment,
-  tiktok-shortlink, xpost, xpost-decline, captcha-welcome).
-- **P2** `retry` gained `kindTransport` (3 attempts, 1/2/4s) and
-  `Policy.AttemptTimeout`; `tgclient` splits control (20s per attempt)
-  from media (240s, 2 transport attempts); telego's fasthttp client has
-  65s read / 240s write; the long poll sets `Timeout: 30`.
-- **P3** `internal/bot/tiktok_source.go`: download goes mirror-first via
-  tikwm (shares the comment pacer), yt-dlp is the fallback with a 45s
-  deadline per attempt; both paths are named in one error; photo posts
-  (`errPhotoPost`) decline instead of queueing forever.
-- **P4 applied.** `docker-compose.yml` pins
-  `dns: [192.168.0.1, 1.1.1.1, 8.8.8.8]`; in-container
-  `/etc/resolv.conf` now reads `ExtServers: [192.168.0.1 1.1.1.1
-  8.8.8.8]`, `Overrides: [nameservers]`, and both
-  `api.telegram.org` and `tikwm.com` resolve from inside the container.
-  Baseline for the follow-up count (24h before the change): **79**
-  lines matching `lookup api.telegram.org`.
-- **First backup ever taken** (P5, partially):
-  `/home/veschin/bidlobot-backups/bidlobot-20260912-082101.db`,
-  2097152 bytes, bbolt page magic `ed0cdaed`. `deploy/backup.sh` cannot
-  produce it as a normal user (see section 2).
+- **What the bot is.** BidloBot: a Telegram supergroup bot in Go -
+  stats, mini-games, cleanup lifecycle, referral + reputation, captcha
+  + owner admission gate, content reposts (YouTube `si=` sanitizer,
+  TikTok via tikwm mirror + yt-dlp fallback, X-post via FixTweet), and
+  owner-only `/summarize` (OMP/Pi CLI + DeepSeek V4 Flash over a RAM
+  window of recent messages).
+- **Deployed.** The owner's **desktop**, not the Docker host:
+  systemd --user unit `bidlobot.service`, binary
+  `~/.local/lib/bidlobot/bin/bidlobot` (previous binary kept as
+  `bidlobot.prev`), env `~/.config/bidlobot/env`, data dir
+  `~/.local/share/bidlobot/`. Commit **`dc33ba8`** ("feat(summarize):
+  opt-in durable window in a separate bbolt file"), built with
+  `-ldflags "-X main.version=local -X main.commit=$(git rev-parse
+  --short HEAD)"`. The commit is **LOCAL ONLY - not pushed to origin**.
+- **What just landed: opt-in durable summarize window.**
+  - Env: `SUMMARIZE_PERSIST` (default **off**),
+    `SUMMARIZE_PERSIST_TTL` (default `168h`, validated 1h..720h only
+    when the flag is on). The desktop env has `SUMMARIZE_PERSIST=1` +
+    `SUMMARIZE_PERSIST_TTL=168h`.
+  - Storage: a **second** bbolt file `DB_PATH/summarize.db`, bucket
+    `summarize_msgs`, key `sm:<absChatID %020d>:<seq %020d>` (bucket
+    NextSequence), value JSON `{msg_id,user_id,name,ts,text}`.
+  - **Invariant:** `bidlobot.db` and therefore `backups/` stay
+    text-free. The separate file is deliberate: `scripts/backup.sh`
+    copies `bidlobot.db` whole, so member text never enters the backup
+    set.
+  - Mechanics: `summarizeRecorder` -> `Service.Record` -> ring +
+    `Persister` RAM queue; one txn per 5s flush (`FlushInterval`),
+    force-flush at 500 rows (`QueueLimit`), final flush on ctx cancel;
+    `App.Stop()` calls `FlushPersistence()` after `inFlight.Wait()` and
+    before the DB closes; failed flush re-queues in order. Prune every
+    10m enforces TTL + 2000 msgs/chat + 4 MiB/chat + 256 chats LRU.
+  - Restore: synchronous at startup, before the long-poll loop;
+    failure logs Warn and continues with an empty window (never
+    fatal).
+  - Deployment restart confirmed startup log
+    `summarize persistence enabled` (ttl 168h, file path) and
+    `summarize window restored chats=0 rows=0` - fresh file, no rows
+    yet.
+- Code: new `internal/domain/summarize/persister.go` (+test) and
+  `internal/storage/summarize_repo.go` (+test); edits to `buffer.go`,
+  `service.go`, `storage/keys.go`, `bot/app.go`,
+  `cmd/bidlobot/{config.go,main.go}`. Docs 45/60/70 + 00_index and
+  `devlog/11_summarize_persistence.md` updated in the same commit.
+- Full verification at commit time: `go build ./...`, `go vet ./...`,
+  `gofmt -l` clean; `go test ./...` green (26 packages).
 
-## 2. Negatives (what does NOT exist)
+## 2. Negatives (what is NOT true / NOT done)
 
-- **No backup cron.** Installing it needs root on the deploy host and
-  `sudo` there requires a password, so it is uninstalled. The entry to
-  install and the root hand-run command are in
-  `70_deployment.md` "Backup". Until then the only snapshot is the
-  hand-made one above.
-- **`deploy/backup.sh` cannot run as the deploy user**: `/var/backups`
-  is root-owned, `COMPOSE_DIR` defaults to `/opt/bidlobot` (the checkout
-  is `/home/veschin/bidlobot`), and the volume path under
-  `/var/lib/docker/volumes` is root-only. Verified: as `veschin` it
-  stops the bot, prints `ERROR: ... bidlobot.db missing`, and starts it
-  again. The root-free alternative (`docker cp`, documented) works.
-- **The two queued TikTok jobs are still queued** until the owner runs
-  `/flush` in the production chat (`vt.tiktok.com/ZSqfcymnR`,
-  `vt.tiktok.com/ZSq5d4Rxh`). Both answer `code:0 success` through the
-  mirror from inside the container.
-- **`internal/domain/monthstats` boundary race fixed** (commit 2 of this
-  session): the flush skipped any chat whose boundary was already
-  persisted by the eager first-`Add` write, so `LiveTrackStart` could
-  stay pinned at the first-SEEN ts instead of the earliest live message
-  ts that `30_stats.md` defines. The gate is gone, the flush now
-  persists the running minimum every time (the store no-ops a repeat),
-  the test double mirrors the bbolt repository, and
-  `TestBufferLiveTrackStartTracksEarliest` covers the ordering
-  deterministically. 25/25 green with `-race` (was 8/12 failing).
-  **Not deployed yet** - the running container predates this fix.
-- Residual risk, accepted: the mirror download reuses the shared 30s
-  HTTP client (`tiktokCommentHTTPClient`), so a very large CDN transfer
-  can time out and fall through to yt-dlp. Measured throughput (~1 MiB
-  in 1.1-1.5s) leaves the bound comfortable for production sizes.
-- **`/health` reports 503 while the chat is quiet.** At 08:26 UTC on
-  2026-09-12 the container went `unhealthy` with reason `no updates
-  received since startup`, exactly when the 5-minute startup grace
-  expired, because no update had arrived since the 08:21:07 restart.
-  Verified NOT a wedged poll: the container holds an ESTABLISHED socket
-  to `149.154.166.110:443`, telego logged no `Getting updates:` error
-  (which would also have stopped the loop - default retry timeout is 0),
-  and eth0 counters moved +566 tx / +743 rx bytes over 40s, i.e. empty
-  long-poll cycles. The freshness window measures the last update, not
-  bot liveness, so a quiet chat always reports 503; a message in the
-  chat flips it back. Pre-existing, unchanged by this session (comment
-  in `health.go` now says so).
+- **The live organic-traffic round trip is NOT observed.** The desktop
+  restart ran the restore path on a fresh file (0 rows). The restart
+  round trip (persist -> close -> reopen -> restore -> per-chat
+  window) is covered by `TestSummarizeWindowSurvivesRestart` with a
+  real bbolt file - no claim beyond that.
+- **`dc33ba8` is unpushed.** `origin/master` is still `59a2d1c`; the
+  push is an explicit next step (a public repo, so it is the owner's
+  call).
+- **`.omp/skills/bidlobot-deploy/` is stale**: it describes the
+  Docker/VM100 deploy and does not match the desktop systemd
+  deployment now in place.
+- **`docs/llm/10_scope.md` does not exist**, although CLAUDE.md
+  references it (it was superseded by PRD.md in the v3 migration but
+  the CLAUDE.md line survives).
+- **`validate.sh` STALE queue has pre-existing entries** for other
+  specs - not introduced by this session, still the actualization
+  queue.
+- Deliberate non-goals (from the session): no `MigrateChatID` rekey
+  for the new bucket (documented gap, same as reputation/captcha/
+  deferred_jobs), no persistence of the summary response cache,
+  `edited_message` still untracked, no change to the memfd transcript
+  path.
 
 ## 3. Queue
 
-- Owner: `/flush` in the production chat; then confirm
-  `tiktok flush: reposted` for both jobs. A failure must name both
-  paths (`mirror: ...; yt-dlp: ...`).
-- Owner: install the root cron entry (needs the host sudo password).
-  Decision on 2026-09-12 was **manual backups for now**, so the cron is
-  intentionally not installed; re-ask before adding it.
-- Deploy the monthstats boundary fix (one recreate, ~15s) when
-  convenient.
-- Next session, 24h after 2026-09-12 08:20 UTC: recount
-  `docker logs --since 24h bidlobot 2>&1 | grep -c 'lookup
-  api.telegram.org'` - target 0 against the 79 baseline.
+- **Push `dc33ba8`** to origin after review.
+- **Observe the live round trip**: let real chat traffic accumulate,
+  restart the unit, confirm `summarize window restored chats=N rows=M`
+  with M>0 and that `/summarize` sees pre-restart messages.
+- Reconcile `.omp/skills/bidlobot-deploy/` with the desktop systemd
+  deployment (or retire it).
+- Fix the stale CLAUDE.md reference to `docs/llm/10_scope.md`.
+- Work the `validate.sh` STALE queue (pre-existing entries).
 
-## 4. Read order
+## 4. Gotchas (respect these)
 
-1. `docs/llm/56_tiktok_repost.md` (Video source, Pipeline, Failure
-   handling) - the new download contract.
-2. `docs/llm/60_architecture.md` (App-level middleware, Failure matrix).
-3. `docs/llm/50_telegram.md` "Rate limits" + "Error handling" - retry
-   classes and panic recovery.
-4. `docs/llm/70_deployment.md` "Backup" before touching host backups.
+- **Never log message text from the summarize path.** The memfd
+  transcript stays; no temp file on the provider path.
+- **The flag is the only thing** between the default RAM-only posture
+  and member text on disk. `TestLoadConfig_SummarizePersistDefaultsOff`
+  exists so the privacy default cannot silently flip.
+- **A second process cannot open `bidlobot.db` while the bot runs**
+  (exclusive flock). On-disk inspection needs the bot stopped.
+- **bbolt never shrinks after prune** - `summarize.db` keeps its
+  high-water mark.
+- **Hard power loss can lose up to one flush interval (5s)** of window
+  writes. SIGTERM/systemd restart loses nothing (final flush in
+  `App.Stop()`).
+- A corrupt/unreadable `summarize.db` is Warn + empty window, never a
+  startup failure.
 
-## 5. Smoke test (run before touching anything)
+## 5. Read order
+
+1. `devlog/11_summarize_persistence.md` - what landed and why.
+2. `docs/llm/45_summarize.md` - window, caps, privacy, persistence.
+3. `docs/llm/60_architecture.md` - layering, bbolt schema, invariants.
+4. `docs/llm/70_deployment.md` - env vars, backup, `summarize.db`
+   exclusion note.
+
+## 6. Smoke test (run before touching anything)
 
 ```sh
-go build ./... && go vet ./...
-go test -race ./...          # expect: only the monthstats flake can fail
-cd docs/llm && ./validate.sh # expect: exit 0
+go build ./... && go vet ./... && gofmt -l .   # expect: no output from gofmt
+go test ./...                                   # expect: all packages ok
+cd docs/llm && ./validate.sh                    # expect: exit 0
 ```
 
-Live checks:
+After a restart of the desktop unit, grep for exactly these two lines:
 
 ```sh
-ssh veschin@192.168.0.101 'docker inspect bidlobot --format "{{.State.Status}} {{.State.Health.Status}}"; \
-  docker exec bidlobot wget -qO- http://127.0.0.1:8080/health; echo; \
-  docker exec bidlobot cat /etc/resolv.conf'
+journalctl --user -u bidlobot.service -n 50 | grep -E \
+  'summarize persistence enabled|summarize window restored'
+# expect: "summarize persistence enabled" (ttl, file path) and
+#         "summarize window restored chats=<N> rows=<M> cutoff=<ts>"
 ```
 
-## 6. Agent errors
+## 7. Agent errors
 
-- The plan assumed `go test -race ./...` would be fully green; the
-  monthstats flake was reproduced on a clean worktree (8/12) to prove it
-  predated this change, then traced to three disagreeing layers (store
-  min, flush gate, test double) and fixed as its own commit.
-- The plan's `withTikwmStub` reuse did not fit the media endpoint (it
-  switches on `tikwmPathList`/`tikwmPathReply`), so the new tests carry
-  their own `withTikwmMediaServer` helper; the pacer interval is zeroed.
-- P3 assumed photo posts are identifiable by an empty `data.play`. A
-  live probe showed they carry images *and* a play URL on a music host
-  that serves no MP4, so the sentinel is also returned when a post
-  carrying images fails to deliver bytes.
-- The plan expected `deploy/backup.sh` to succeed when run by hand; it
-  cannot as a non-root user. Root cause chain in section 2.
+- The storage worker emitted an invalid `for ... range c.First(); ...`
+  clause (Go has no range form with a post statement) - it compiles
+  nowhere and was caught by the orchestrator's `gofmt -l` / `go build`
+  pass, not by the worker. A test file also landed unformatted
+  (`gofmt -w` needed). Lesson: workers are not allowed to build while
+  sibling slices are mid-flight, so the orchestrator's post-batch
+  build+go+vet pass is the only thing that catches this class.

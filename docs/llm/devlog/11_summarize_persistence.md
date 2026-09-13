@@ -51,9 +51,15 @@ privacy posture intact by default.
 - Restart round trip covered by a test: persist rows, reopen, restore,
   assert the window (and that restore happens before any live message
   can be seeded).
-- Live restart smoke on the desktop deployment: flag on, exchange
-  messages, restart the process, `summarize window restored` in the
-  log, `/summarize` sees pre-restart messages.
+- Live deploy on the desktop deployment: flag on, process restarted,
+  startup log shows `summarize persistence enabled` and
+  `summarize window restored chats=0 rows=0` (fresh file - the restore
+  path ran, there was nothing to restore yet).
+- NOT YET OBSERVED LIVE: the round trip with real chat traffic
+  (message -> rows on disk -> restart -> `rows=M`, M>0). The chat was
+  idle at deploy time. To confirm: let messages accumulate, then
+  `systemctl --user restart bidlobot` and grep the log for
+  `summarize window restored`.
 
 ## Notes
 
