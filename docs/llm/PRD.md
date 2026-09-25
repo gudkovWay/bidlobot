@@ -5,8 +5,9 @@ Status: DRAFT
 <!-- Later edits need user permission; each lands as:
      Amended: 2026-09-01 - <one-line reason> -->
 <!-- Amended: 2026-09-25 - /summarize regated to the bot owner
-     (BOT_OWNER_ID, no hardcoded id) and explicit YouTube /shorts/<id>
-     links now repost the video; user-approved product change. -->
+     (BOT_OWNER_ID, no hardcoded id); user-approved product change.
+     Amended: 2026-09-25 - YouTube Shorts download/repost rolled back
+     after two live bot-auth failures; owner declined cookies/PO token. -->
 
 ## Problem
 
@@ -24,7 +25,7 @@ single long-polling process with an embedded database.
 An always-on Telegram bot that makes IT supergroups livelier and cleaner with zero
 moderation work. It measures activity, runs lightweight games, and keeps durable per-chat
 reputation and referral catalogs. External posts - YouTube links with tracking params,
-explicit YouTube Shorts videos, TikTok videos, X/Twitter posts - are re-shared as
+TikTok videos, X/Twitter posts - are re-shared as
 attributed, self-contained messages and the originals removed. The bot's owner can
 request an LLM digest of the recent conversation. New
 members pass an opt-in math captcha with a welcome animation before they can post. The
@@ -41,9 +42,7 @@ In:
 - Reputation - durable per-chat praise/roast economy (`/praise` `/roast` `/rep` `/reptop`).
 - Referral catalog - chat-scoped registry of referral links (`/refs` `/refreg` `/refreport`).
 - YouTube links - the `si=` share-tracking param is stripped (delete + attributed
-  repost), and an explicit `youtube.com/shorts/<id>` link is downloaded with yt-dlp and
-  reposted as a Telegram video (50 MiB cap, audio check, repost-first/delete-after-success,
-  decline note on failure with no queue).
+  repost), for every recognized YouTube URL that carries it.
 - TikTok video repost - downloads a TikTok video, reposts it attributed, deletes the original.
 - X/Twitter post repost - a status URL becomes ONE message: tweet text as caption, every
   photo/video as native Telegram media, canonical link to the original, via the public
@@ -70,8 +69,10 @@ Out (non-goals):
 - Bio/profile registration FSM - archived (branch `archive/profiles-bio`, tag
   `v0-bio-archive`).
 - Permanently dropped (no reintroduction without an explicit ask): YouTube Summary (LLM
-  summarization of external videos), Inline Query DSL parser, salary field, zen-lang
-  config, i18n switching, bot-managed admin list.
+  summarization of external videos), YouTube Shorts download/repost (rolled back
+  2026-09-25: YouTube requires cookies/PO-token bot auth for serverless download; the
+  owner declined both), Inline Query DSL parser, salary field, zen-lang config, i18n
+  switching, bot-managed admin list.
 
 ## Success criteria
 
@@ -84,12 +85,9 @@ Out (non-goals):
   link, via the public FixTweet API); the original is deleted only after a successful send
   and kept with a decline note on failure; at most one expansion in flight at a time.
 - TikTok contract: download -> attributed repost -> delete original.
-- YouTube contract: for non-Short links, delete + attributed repost without `si=`
-  (sanitizer semantics unchanged); for an explicit `youtube.com/shorts/<id>` link,
-  download via yt-dlp (supported JS runtime: Deno preferred, pinned-image Bun
-  fallback; combined-stream MP4/H.264, no side longer than 1280 = the 720p
-  bound for portrait and landscape, 50 MiB) -> attributed video repost ->
-  delete the original only after a successful send; decline on failure, never queued.
+- YouTube contract: for any recognized YouTube link carrying `si=`, delete + attributed
+  repost without `si=` (sanitizer semantics; includes `/shorts/<id>` links when they
+  carry `si=`).
 - Summarize contract: owner-only (`BOT_OWNER_ID`, never a hardcoded id), always-on provider.
 - Admission contract: only `BOT_OWNER_ID` may add the bot; captcha is opt-in via
   `CAPTCHA_ENABLED`, wrong or missing answer is kicked.

@@ -59,18 +59,16 @@ authority.
   source.
 - **Data**: `~/.local/share/bidlobot/` holds `bidlobot.db`, plus
   `summarize.db` when `SUMMARIZE_PERSIST=1`. `TMPDIR` points at
-  `~/.local/share/bidlobot/tmp` so TikTok/Shorts scratch files stay
+  `~/.local/share/bidlobot/tmp` so TikTok scratch files stay
   off the host tmpfs.
 - **Tool PATH**: the unit prepends `~/.local/lib/bidlobot/bin` and the
-  OMP bin dir ahead of the system PATH. After the first live Shorts
-  attempt failed in the download layer, the private-dir `yt-dlp` entry
-  was atomically switched to `/usr/bin/yt-dlp 2026.08.19`; the former
-  standalone `2026.03.17` executable is preserved as
-  `yt-dlp.2026.03.17`. The process selects `/usr/bin/deno` as its
-  supported JS runtime; `/usr/bin/bun` is newer than yt-dlp's supported
-  Bun range and is therefore not selected. `ffmpeg`/`ffprobe` come from
-  the host and `omp` from `~/.cache/.bun/bin`. The compose image still
-  uses its separately pinned yt-dlp and supported Bun fallback
+  OMP bin dir ahead of the system PATH. The pre-feature private-dir
+  `yt-dlp 2026.03.17` executable is restored for TikTok fallback use;
+  `/usr/bin/yt-dlp 2026.08.19` is no longer selected by the unit.
+  `ffmpeg`/`ffprobe` come from the host and `omp` from
+  `~/.cache/.bun/bin`. The extra `yt-dlp.2026.03.17` copy is the
+  rollback artifact from the failed Shorts experiment and may be
+  removed independently. The compose image uses its own pinned yt-dlp
   ([Image](#image)).
 - **Build**: the binary is built from the checkout with
   `-ldflags "-X main.version=local -X main.commit=$(git rev-parse --short HEAD)"`
@@ -110,20 +108,17 @@ path only.
   dependency is pure Go). Build cache via BuildKit. Builds `bidlobot`,
   `bidlobot-backup`, `bidlobot-probe` into `/out`.
 - `debian:bookworm-slim` runtime. Installs `bash ca-certificates curl
-  ffmpeg tini tzdata unzip wget` (ffmpeg/ffprobe for the TikTok and
-  YouTube Shorts audio checks), **yt-dlp pinned release** (2026.03.17, sha256-checked
+  ffmpeg tini tzdata unzip wget` (ffmpeg/ffprobe for the TikTok
+  audio check), **yt-dlp pinned release** (2026.03.17, sha256-checked
   at build; a newer release can be pinned via `YT_DLP_VERSION` arg -
   the pin holds until upstream fixes the TikTok extractor regression,
   yt-dlp issue #17403), and **Bun 1.3.14 +
   `@oh-my-pi/pi-coding-agent` 16.3.6** (the `omp` CLI on PATH,
   version-checked at build). yt-dlp is the **fallback** TikTok source;
   the primary path is the tikwm mirror
-  ([56_tiktok_repost.md](56_tiktok_repost.md)). It is the **only**
-  source for the YouTube Shorts repost. Runtime selection prefers Deno
-  when present and otherwise uses this pinned, supported Bun
-  (`--js-runtimes bun`, [55_youtube_sanitizer.md](55_youtube_sanitizer.md)).
-  No `--remote-components` is used, so the downloader never fetches
-  unpinned code at runtime. Runs as `bidlobot` (UID 65532),
+  ([56_tiktok_repost.md](56_tiktok_repost.md)). Bun serves OMP, not the
+  yt-dlp fallback. No `--remote-components` is used, so the downloader
+  never fetches unpinned code at runtime. Runs as `bidlobot` (UID 65532),
   `WORKDIR /var/lib/bidlobot`, tini as PID 1,
   HEALTHCHECK on the loopback `/health`.
 
@@ -373,44 +368,33 @@ docker compose start bot
 
 ## Change status (2026-09-25, local only)
 
-The owner-gated `/summarize` and YouTube Shorts repost are deployed to
-the desktop user service from source commit `6fcf601`. The source lives
-in worktree
-`/home/q/dev/qol/.worktrees/bidlobot/feat/local-youtube-shorts-owner-summarize`
-on branch `feat/local-youtube-shorts-owner-summarize`, based on
-`d9d3c48`. Nothing is pushed to `origin` and no PR exists.
+The owner-gated `/summarize` (commit `8a24e34`) is deployed to the
+desktop user service. The YouTube Shorts repost shipped in commit
+`6fcf601` failed twice live (`Sign in to confirm you're not a bot` with
+both yt-dlp 2026.03.17 and 2026.08.19); the owner declined cookies /
+PO-token auth and ordered a full rollback
+([devlog/13_youtube_shorts_rollback.md](devlog/13_youtube_shorts_rollback.md)).
 
-The deploy build used
-`-ldflags "-X main.version=local -X main.commit=6fcf601"`. The previous
-`d9d3c48` binary is preserved as `bidlobot.prev`. After
-`systemctl --user restart bidlobot.service` at 23:05:56 MSK, the unit
-was observed `active/running`; its startup log named commit `6fcf601`,
-authenticated with Telegram, restored the summarize window and entered
-polling.
+State at this writing:
 
-Host prerequisites observed during the deploy:
-
+- The **rollback code** (Shorts download/repost removed; sanitizer
+  restored to `si=` only) lives in the worktree
+  `/home/q/dev/qol/.worktrees/bidlobot/feat/local-youtube-shorts-owner-summarize`
+  on branch `feat/local-youtube-shorts-owner-summarize`, based on
+  `d9d3c48`. Nothing is pushed to `origin` and no PR exists. It is
+  **pending orchestrator verification and deployment**.
+- The **desktop unit still runs the Shorts-capable commit `6fcf601`**
+  binary; the rollback binary is not deployed yet. The previous
+  `d9d3c48` binary is preserved as `bidlobot.prev`.
+- The private-dir `yt-dlp` executable is already restored to the
+  pre-feature `2026.03.17` version. The temporary switch to system
+  `2026.08.19` is over; the separately named `yt-dlp.2026.03.17` copy
+  remains only as a removable rollback artifact.
 - `~/.config/bidlobot/env` defines `BOT_OWNER_ID` (value withheld),
   `SUMMARIZE_PERSIST=1` and `SUMMARIZE_PERSIST_TTL=168h`.
-- The first live Short at 23:22:44 MSK reached the deployed pipeline but
-  failed in the download layer after three attempts. The journal named
-  `yt-dlp 2026.03.17` and warned that it was older than 90 days; the
-  captured 400-character output omitted the terminal error.
-- The private-dir `yt-dlp` entry now resolves `/usr/bin/yt-dlp
-  2026.08.19`; the old `2026.03.17` binary is retained as
-  `yt-dlp.2026.03.17` for rollback. This is a one-variable operational
-  A/B; the daemon itself remains active and need not restart because
-  each download resolves and executes a new child process.
-- The Shorts path selects installed Deno 2.9.7. Bun 1.4.2, Node 26.10.0,
-  ffmpeg/ffprobe 9.0.2 and OMP 18.3.1 were also present.
-- `go build ./...` and `go vet ./...` exited 0 under a capped user
-  systemd scope. Changed Go files produced no `gofmt -l` output;
-  `git diff --check` exited 0; `docs/llm/validate.sh` exited 0 with
-  its stale-spec queue.
 
-Tests were not run because they were not requested. The same Short must
-be posted again to establish whether updating yt-dlp fixes the download;
-until then the user-visible outcome remains unverified.
+Tests were not run for the rollback at this writing; verification is
+the orchestrator's single post-batch step.
 
 ## Operational footguns
 

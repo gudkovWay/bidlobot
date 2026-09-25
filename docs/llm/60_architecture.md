@@ -38,8 +38,7 @@ internal/
     captcha.go         new-member captcha wiring (opt-in)
     deferred.go        /flush per-user retry queue
     summarize.go       /summarize + /итог handler
-    youtube_sanitizer.go  YT si= strip (delete+repost) + Shorts pre-check
-    youtube_shorts.go     explicit YT Shorts: yt-dlp download + video repost
+    youtube_sanitizer.go  YT si= strip (delete+repost)
     tiktok_repost.go      TikTok video repost (mirror -> yt-dlp)
     tiktok_source.go      tikwm mirror: resolve + stream the MP4
     xpost.go              X/Twitter sidecar client
@@ -123,9 +122,10 @@ first): `privateGroup` (/help /start /chats) and `sgGroup`
 `statsCountHandler` -> `summarizeRecorder` (if wired) ->
 `youtubeSanitizer` -> `tiktokReposter` -> `xpostReposter`. The
 observers MUST see the original human message before the sanitizer
-deletes+reposts it. `youtubeSanitizer` is one middleware with two
-behaviors: an explicit Shorts link is handed to `youtube_shorts.go`
-(async download+repost) and otherwise the `si=` path runs. Game
+deletes+reposts it. `youtubeSanitizer` strips `si=` from recognized
+YouTube links (including `/shorts/<id>` links carrying `si=`) - the
+Shorts download/repost experiment was rolled back
+([55_youtube_sanitizer.md](55_youtube_sanitizer.md)). Game
 routes register before the observers so their slash commands and
 callbacks coexist.
 
@@ -140,8 +140,8 @@ Side-effect axes:
   referrals, summarize placeholder/edit, sanitizer/reposter sends,
   captcha mute/kick/welcome, onboarding. This keeps high-volume public
   paths inside Telegram's 20 msg/min/chat budget under load.
-- Heavy media work (TikTok download/upload, YouTube Shorts
-  download/upload, xpost render/videos, captcha welcome animation) runs **fire-and-forget** through
+- Heavy media work (TikTok download/upload, xpost render/videos, captcha
+  welcome animation) runs **fire-and-forget** through
   `shared.Go(log, name, fn)`, which spawns the goroutine behind a
   `recover` so a panic there cannot kill the process; the body builds its
   own `context.Background()` because the update loop is sequential and a
@@ -210,7 +210,7 @@ never enters `backups/` (the backup job copies the main file whole;
    reintroduce public moderation, advertise it in
    `helpSupergroup`/`setCommands` group scope, or route destructive
    actions through inline (inline posts publicly).
-4. **Content middlewares are repost-then-delete (YT, YT Shorts,
+4. **Content middlewares are repost-then-delete (YT `si=`,
    TikTok) or add-only (xpost)**, never delete-first. A failed repost
    leaves the original intact.
 5. **No third-party pings.** No user-triggered command emits
@@ -235,8 +235,8 @@ never enters `backups/` (the backup job copies the main file whole;
     Non-owners (admins included) get no reply
     ([45_summarize.md](45_summarize.md)).
 12. **No other retry queue.** Only TikTok exports and summarize calls
-    are enqueued on `deferred_jobs`; YouTube Shorts failures decline
-    and keep the original ([55_youtube_sanitizer.md](55_youtube_sanitizer.md)).
+    are enqueued on `deferred_jobs`; sanitizer repost failures keep the
+    original ([55_youtube_sanitizer.md](55_youtube_sanitizer.md)).
 
 ## Subscription set
 
@@ -276,8 +276,6 @@ No `edited_message`, no `chat_join_request`.
 | TikTok too-large/send fail | `tiktok_repost.go` | public decline note; original kept |
 | xpost any failure | `xpost.go` | decline note; original kept (never deleted) |
 | YT sanitizer repost fail | `youtube_sanitizer.go` | original left intact |
-| YT Shorts temp-dir/download/stat/audio/send fail | `youtube_shorts.go` | decline note (`sendDecline` + `publicPureFailure`); original kept; never queued |
-| YT Shorts incompatible/oversized result | `youtube_shorts.go` | decline note; original kept (requires combined MP4/H.264, max 50 MiB) |
 | summarize provider fail | `summarize.go` | enqueue to deferred queue; placeholder stays |
 | summarize timeout/budget | `summarize.go` | Russian error, lower N |
 | Game/stats flood | `cooldown.gateMsg` | silent drop (bounded notice) |
@@ -290,8 +288,7 @@ No `edited_message`, no `chat_join_request`.
 
 `internal/bot/deferred.go` + `storage/deferred_repo.go`. Per-user
 retry queue for failed **TikTok exports** and **summarize** calls
-(commits 81f45c9, 47cdd99) - and **only** those: YouTube Shorts
-failures decline and keep the original, with no queue type added
+(commits 81f45c9, 47cdd99) - and **only** those
 ([55_youtube_sanitizer.md](55_youtube_sanitizer.md)). Public `/flush`
 (30s cooldown) processes the caller's own jobs sequentially in a
 background goroutine: tiktok -> `tryTikTokExport` (full

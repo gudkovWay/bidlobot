@@ -158,8 +158,8 @@ Signal: SIGTERM or SIGINT.
 4. Close DB connection
 5. Exit
 
-Heavy media goroutines (TikTok/xpost/YouTube Shorts/captcha welcome)
-are NOT tracked - best-effort, may be lost on shutdown. They are
+Heavy media goroutines (TikTok/xpost/captcha welcome) are NOT tracked -
+best-effort, may be lost on shutdown. They are
 launched through `shared.Go`, so a panic inside one is logged instead
 of killing the process.
 

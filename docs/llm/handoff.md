@@ -1,4 +1,4 @@
-# Handoff - 2026-09-25 (owner-only summarize + YouTube Shorts deployed locally)
+# Handoff - 2026-09-25 (Shorts rolled back; rollback pending verification/deploy)
 
 ## 1. Current state
 
@@ -8,148 +8,108 @@
 - The live deployment is the owner's desktop user service:
   `bidlobot.service`, binary `~/.local/lib/bidlobot/bin/bidlobot`, env
   `~/.config/bidlobot/env`, data `~/.local/share/bidlobot/`.
-- The service is **active/running** after the 2026-09-25 23:05:56 MSK
-  restart. PID observed after restart: `122310`.
-- The deployed binary reports `version=local commit=6fcf601`, authenticated
-  as `bidlolocal_bot`, restored the summarize window and entered Telegram
-  polling. The previous binary is preserved as `bidlobot.prev` and reports
-  commit `d9d3c48`.
+- The service is **active/running** on the Shorts-capable binary
+  `commit=6fcf601`; the previous binary is preserved as `bidlobot.prev`
+  (commit `d9d3c48`).
 - Source is local-only in worktree
   `/home/q/dev/qol/.worktrees/bidlobot/feat/local-youtube-shorts-owner-summarize`,
   branch `feat/local-youtube-shorts-owner-summarize`, base `d9d3c48`.
   No push and no PR.
-- Feature commits:
-  - `8a24e34 feat(summarize): restrict digests to bot owner`
-  - `6fcf601 feat(youtube): repost Shorts as Telegram videos`
+- The **YouTube Shorts download/repost feature is rolled back** in the
+  working tree: `youtube_shorts.go` is deleted, the sanitizer is restored
+  to `si=`-only. This rollback is **pending orchestrator verification
+  and deployment** - the deployed binary still carries Shorts until the
+  orchestrator builds/deploys and the final handoff is updated.
+- Kept: `8a24e34 feat(summarize): restrict digests to bot owner`.
+  Dropped: the `6fcf601` Shorts feature commit's code content (rollback
+  not yet committed).
 
-## 2. Behavior delivered
+## 2. Why the rollback
 
-### Owner-only `/summarize` and `/итог`
+Two live failures of the Shorts path against the desktop deployment:
 
-- Authorization is the exact `App.botOwnerID` loaded from the required
-  `BOT_OWNER_ID`; no numeric Telegram ID is hardcoded.
-- Non-owners, including group admins and anonymous admins, receive no reply.
-- The command bypasses `gateMsg` so unauthorized calls cannot produce its
-  bounded cooldown notice. Authorized calls still use the internal
-  summarize cooldown.
-- Deferred summarize jobs created before this cutover are discarded during
-  `/flush` when their recorded user is not the current bot owner. This
-  prevents the deferred path from bypassing the new authorization rule or
-  spending provider budget.
-- Help, command-menu and onboarding copy describe the command as owner-only.
+1. 23:22:44 MSK, `youtube.com/shorts/dspcs6gINwA` at commit `6fcf601`:
+   detection succeeded, download failed after three attempts with stale
+   `yt-dlp 2026.03.17`.
+2. Repeat with `/usr/bin/yt-dlp 2026.08.19`: same failure with the
+   terminal error visible - `ERROR: Sign in to confirm you're not a bot.
+   Use --cookies-...`.
 
-### YouTube Shorts video repost
+This proved YouTube requires bot authentication (cookies or PO token)
+for this serverless download path. The owner rejected both options
+("никак, откатывай это"). Rollback contract: explicit `/shorts/<id>`
+messages go through the existing `si=` sanitizer like any other YouTube
+URL (acted on when they carry `si=`); owner-only `/summarize`, TikTok,
+X-post and generic failure behavior are unchanged. See
+[devlog/13_youtube_shorts_rollback.md](devlog/13_youtube_shorts_rollback.md).
 
-- The existing `youtubeSanitizer` first detects explicit recognized YouTube
-  URLs whose path is exactly `/shorts/<id>`. URL entities and visible text or
-  captions are supported; scheme-less links are normalized.
-- A recognized Short starts a panic-contained background job and skips the
-  old `si=` sanitizer for that update, preventing double handling.
-- `youtu.be` is deliberately not inferred to be a Short. Non-Short YouTube
-  links retain the previous `si=` sanitizer behavior.
-- Download uses the pinned PATH `yt-dlp` with Deno preferred and Bun as the
-  container fallback. There are three isolated attempts, each with a 45 s
-  deadline and a 2 s delay between attempts. Runtime remote components are
-  not enabled.
-- The accepted media is a combined MP4/H.264 stream with neither dimension
-  above 1280, sorted toward the 720p equivalent, and capped at 50 MiB.
-  `ffprobeHasAudio` applies the existing audio validation policy.
-- The bot sends the video with an attributed, HTML-safe, UTF-16-clamped
-  caption. It deletes the original only after Telegram accepts the video.
-- Temp-dir, download, output selection, size, audio, open or send failure
-  posts the existing decline notice, keeps the original and creates no
-  deferred job.
+## 3. Behavior (post-rollback contract)
 
-## 3. Host prerequisites observed
+### Owner-only `/summarize` and `/итог` (unchanged, deployed)
 
-- `~/.config/bidlobot/env` defines `BOT_OWNER_ID`,
-  `SUMMARIZE_PERSIST=1`, `SUMMARIZE_PERSIST_TTL=168h`, the Pi/OMP binary and
-  captcha configuration. The owner value is intentionally not copied into
-  source or docs.
-- The user unit prepends `~/.local/lib/bidlobot/bin` to PATH. After the first
-  live Shorts download failed, this entry was switched from standalone
-  `yt-dlp 2026.03.17` to `/usr/bin/yt-dlp 2026.08.19`; the old executable is
-  preserved as `yt-dlp.2026.03.17`.
-- Deno 2.9.7 is installed and is selected by the Shorts pipeline. Bun 1.4.2,
-  Node 26.10.0, ffmpeg/ffprobe 9.0.2 and OMP 18.3.1 were also observed.
-- `TMPDIR=~/.local/share/bidlobot/tmp`, keeping media scratch files off the
-  host tmpfs.
+- Authorization is the exact `App.botOwnerID` from the required
+  `BOT_OWNER_ID`; no hardcoded id. Non-owners, admins included, get no
+  reply. `gateMsg` is bypassed so unauthorized calls emit no cooldown
+  notice; authorized calls use the internal cooldown.
+- `/flush` discards pre-cutover deferred summarize jobs whose recorded
+  user is not the current bot owner.
 
-## 4. Verification evidence
+### YouTube `si=` sanitizer (restored contract)
 
-Observed against the integrated source before deployment:
+- One middleware, one behavior: recognized YouTube links carrying `si=`
+  are reposted attributed with `si=` stripped, then the original is
+  deleted. Includes `/shorts/<id>` links when they carry `si=`; a
+  `si=`-free link (Shorts or otherwise) triggers nothing.
+- Failure keeps the original; no deferred queue for YouTube.
 
-- `go build ./...` under a user systemd scope capped at 12 GiB RAM and 2 GiB
-  swap: exit 0, no output.
-- `go vet ./...` under the same cap: exit 0, no output.
-- `gofmt -l` over every changed Go file: exit 0, no output.
-- `git diff --check`: exit 0, no output.
-- `docs/llm/validate.sh`: exit 0; it reported only the pre-existing stale-spec
-  queue plus a temporary uncommitted-file warning before the Shorts source
-  commit.
-- Final independent review: no Critical or Important findings; confidence
-  0.99.
-- Deploy build identity before installation:
-  `bidlobot version=local commit=6fcf601`.
-- Post-restart service evidence: `ActiveState=active`, `SubState=running`,
-  startup log names commit `6fcf601`, authentication succeeded, summarize
-  state restored and polling started.
+## 4. Host state
 
-Tests were **not run**: none were requested. Owner/non-owner summarize behavior
-has not been exercised live. The first live Shorts attempt is recorded below;
-it proved detection and failure handling, not a successful upload.
+- `~/.config/bidlobot/env` defines `BOT_OWNER_ID` (value withheld),
+  `SUMMARIZE_PERSIST=1`, `SUMMARIZE_PERSIST_TTL=168h`.
+- During diagnosis the private-dir `yt-dlp` was temporarily switched from
+  `2026.03.17` to system `2026.08.19`. The pre-feature private executable
+  is already restored; the separately named `yt-dlp.2026.03.17` copy is
+  only a removable rollback artifact.
 
-Live incident at 23:22:44 MSK: the exact Short
-`youtube.com/shorts/dspcs6gINwA` reached commit `6fcf601`, detection succeeded
-and the download layer failed after three attempts. The decline reply and
-preserved original were expected failure behavior, not feature success. The
-journal identified obsolete `yt-dlp 2026.03.17` but the 400-character output
-preview cut off the terminal error. The local PATH entry now resolves
-`2026.08.19`; a repeat of the same link is the pending one-variable A/B check.
+## 5. Next checks (after the orchestrator verifies + deploys the rollback)
 
-## 5. Next checks
-
-1. In a supergroup, owner sends `/итог`; expect the normal digest flow.
-2. A non-owner, including a group admin, sends `/итог`; expect silence.
-3. Post an explicit `youtube.com/shorts/<id>` URL; expect a Telegram video and
-   deletion of the source message only after successful upload.
-4. Post a non-Short YouTube URL carrying `si=`; expect the old sanitizer path.
-5. If Shorts fails, inspect `journalctl --user -u bidlobot.service -n 50`.
-   The source message must remain and no `/flush` job should appear.
+1. Update this handoff so the deployed commit and behavior match the
+   rolled-back source.
+2. In a supergroup, owner sends `/итог`; expect the normal digest flow.
+   A non-owner sends `/итог`; expect silence.
+3. Post a YouTube URL with `si=` (a `/shorts/<id>?si=...` is a good
+   check); expect the attributed `si=`-stripped repost and deletion.
+4. Post a `si=`-free YouTube link; expect nothing.
+5. Confirm the source file is absent and no active Go/build reference remains.
 
 ## 6. Deliberate non-goals and drift
 
-- No `youtu.be` Shorts detection, new environment variable, bbolt bucket,
-  queue type or change to non-Short `si=` semantics.
+- No cookies/PO-token authentication for yt-dlp - explicitly declined.
+- No change to TikTok, X-post, captcha, admission or deferred-queue
+  behavior.
 - No push and no PR.
-- `docs/llm/10_scope.md` is referenced by `CLAUDE.md` but was superseded and
-  removed; `00_index.md` points to `PRD.md` instead.
-- `.omp/skills/bidlobot-deploy/` still describes the Docker/VM100 path; the
-  current production instance is the desktop user service documented in
-  `70_deployment.md`.
-- `ROADMAP.md` E9 still uses the historical admin-summarize wording and omits
-  Shorts from its smoke list. It was outside this approved change set.
+- `ROADMAP.md` E9 still mentions the historical admin-summarize wording
+  and the Shorts smoke item; outside this change set.
+- `.omp/skills/bidlobot-deploy/` still describes the Docker/VM100 path;
+  known drift.
 
 ## 7. Gotchas
 
-- `BOT_OWNER_ID` is load-bearing for both admission and summaries. Missing or
+- `BOT_OWNER_ID` is load-bearing for admission and summaries; missing or
   invalid configuration is a startup error.
-- Owner-only means silence for everyone else; do not add an authorization
-  error message.
-- Keep the local yt-dlp entry on the maintained system release; the former
-  `2026.03.17` binary is rollback-only. Do not add `--remote-components`.
-- Shorts remains repost-first/delete-after-success and intentionally has no
-  deferred queue.
-- A second process cannot open `bidlobot.db` while the live process holds its
-  exclusive lock. A second Telegram poller would also cause a 409 race.
-- Never log summarize message text. With persistence enabled, text belongs
-  only in `DB_PATH/summarize.db`, not the main database or backups.
+- The deployed binary still reposts Shorts as video until the rollback
+  is deployed - do not treat a Shorts repost as a regression signal
+  before then.
+- A second process cannot open `bidlobot.db` while the live process
+  holds its exclusive lock; a second poller causes a 409 race.
+- Never log summarize message text; with persistence it belongs only in
+  `DB_PATH/summarize.db`.
 
 ## 8. Read order
 
-1. `devlog/12_owner_summarize_and_shorts.md`
-2. `45_summarize.md`
-3. `55_youtube_sanitizer.md`
-4. `60_architecture.md`
-5. `70_deployment.md`
-6. `devlog/11_summarize_persistence.md`
+1. `devlog/13_youtube_shorts_rollback.md`
+2. `devlog/12_owner_summarize_and_shorts.md` (Shorts portion superseded)
+3. `45_summarize.md`
+4. `55_youtube_sanitizer.md`
+5. `60_architecture.md`
+6. `70_deployment.md`

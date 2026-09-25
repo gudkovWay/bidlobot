@@ -25,7 +25,7 @@ devlog (immutable history). Run `./validate.sh` after any edit.
 - [30_stats.md](30_stats.md) - chat statistics: counting rules, buffering, lifetime + monthly nominations, display, MSK day boundary
 - [45_summarize.md](45_summarize.md) - owner-only `/summarize` + `/итог` (gate = `BOT_OWNER_ID`): OMP/Pi CLI + DeepSeek V4 Flash, RAM window + opt-in durable mirror, weighted digest with cost, deferred retry, privacy
 - [50_telegram.md](50_telegram.md) - Telegram API specifics: chat types, anonymous admins, rate limits + per-user cooldown notice, error handling, onboarding + admission gate, captcha, shutdown
-- [55_youtube_sanitizer.md](55_youtube_sanitizer.md) - YouTube links: `si=` strip (host scoping, repost-then-delete, exclusions, v1 gaps, privacy gate) + explicit `/shorts/<id>` links downloaded with yt-dlp (Deno preferred, pinned-image Bun fallback) and reposted as video (50 MiB cap, audio check, decline on failure, no deferred queue)
+- [55_youtube_sanitizer.md](55_youtube_sanitizer.md) - YouTube links: `si=` strip only (host scoping, repost-then-delete, exclusions, v1 gaps, privacy gate). The Shorts download/repost experiment was rolled back 2026-09-25 after live bot-auth failures; `/shorts/<id>` links are sanitized like any other YouTube URL when they carry `si=`
 - [56_tiktok_repost.md](56_tiktok_repost.md) - TikTok video repost: tikwm mirror download with yt-dlp fallback, 50 MiB cap, audio check, photo-post decline, repost-then-delete, deferred queue on failure
 - [57_xpost.md](57_xpost.md) - X/Twitter post repost: FixTweet API, single-message album (text + photos + videos + canonical link), repost-then-delete, variant size selection, single-slot concurrency
 - [58_referral.md](58_referral.md) - referral catalog: /refs /refreg /refreport, chat-scoped buckets, registration UX, moderation
@@ -47,7 +47,8 @@ devlog (immutable history). Run `./validate.sh` after any edit.
 - [devlog/09_xpost_v2_and_docs_v3.md](devlog/09_xpost_v2_and_docs_v3.md) - 2026-08-16: X-post reworked to single-message FixTweet repost (xshot sidecar deleted), docs/llm migrated to v3.
 - [devlog/10_media_resilience.md](devlog/10_media_resilience.md) - 2026-09-12: panic containment (recover middleware + shared.Go), transport retry class with per-attempt deadlines, TikTok download via the tikwm mirror with yt-dlp fallback.
 - [devlog/11_summarize_persistence.md](devlog/11_summarize_persistence.md) - 2026-09-13: opt-in durable mirror of the summarize window (SUMMARIZE_PERSIST), separate bbolt file, batched writes, restore at startup.
-- [devlog/12_owner_summarize_and_shorts.md](devlog/12_owner_summarize_and_shorts.md) - 2026-09-25: `/summarize` regated to the bot owner (`BOT_OWNER_ID`), YouTube Shorts downloaded through yt-dlp with Deno and reposted as video; deployed locally at `6fcf601` (no push/PR).
+- [devlog/12_owner_summarize_and_shorts.md](devlog/12_owner_summarize_and_shorts.md) - 2026-09-25: `/summarize` regated to the bot owner (`BOT_OWNER_ID`), YouTube Shorts downloaded through yt-dlp with Deno and reposted as video; deployed locally at `6fcf601` (no push/PR). **Shorts portion rolled back the same day - see devlog 13.**
+- [devlog/13_youtube_shorts_rollback.md](devlog/13_youtube_shorts_rollback.md) - 2026-09-25: Shorts download/repost rolled back after two live `Sign in to confirm you're not a bot` failures (yt-dlp 2026.03.17 and 2026.08.19); owner declined cookies/PO-token auth; sanitizer restored to `si=` only; owner-only `/summarize` kept. Rollback binary pending orchestrator verification/deploy.
 
 ## Removed surfaces (code deleted; docs deleted with them)
 

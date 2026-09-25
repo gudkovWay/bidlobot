@@ -92,11 +92,8 @@ func registerRoutes(
 		sgGroup.Use(summarizeRecorder(a.summarize))
 	}
 	// Runs after the passive observers (membership/stats see the original
-	// human message). An explicit YouTube Shorts link is handed to the
-	// async video pipeline in youtube_shorts.go; every other message goes
-	// through the si= sanitizer, which deletes+reposts a YouTube link
-	// carrying the share-tracking param. nil-tolerant against a minimal
-	// test App.
+	// human message); it deletes+reposts a YouTube link carrying the si=
+	// share-tracking param. nil-tolerant against a minimal test App.
 	sgGroup.Use(youtubeSanitizer(a))
 
 	// TikTok video repost: download, trim watermark end-screen, repost
