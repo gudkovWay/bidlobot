@@ -44,3 +44,18 @@ The rollback deletes `internal/bot/youtube_shorts.go` and restores
 in `internal/bot/routes.go`. At this snapshot it is written but pending
 orchestrator deployment; the desktop unit still runs the Shorts-capable
 commit `6fcf601`.
+
+## Deployment outcome
+
+The rollback was committed as `84d5d89` and deployed to the desktop
+user service at 23:52:06 MSK. The unit is `active/running`, PID
+`204587`, with `ExecMainStatus=0`; its startup log names commit
+`84d5d89`, then records authentication, summarize-window restore, and
+polling startup. The replaced `6fcf601` binary is preserved as
+`bidlobot.prev`.
+
+The private `yt-dlp` executable was restored to pre-feature version
+`2026.03.17`. Verification succeeded with `go build ./...`,
+`go vet ./...`, targeted `gofmt -l`, `git diff --check`, and
+`bash docs/llm/validate.sh` (0 errors, 0 warnings; 24 stale queue
+entries). Tests were not run because they were not requested.

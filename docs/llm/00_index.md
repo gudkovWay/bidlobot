@@ -48,7 +48,7 @@ devlog (immutable history). Run `./validate.sh` after any edit.
 - [devlog/10_media_resilience.md](devlog/10_media_resilience.md) - 2026-09-12: panic containment (recover middleware + shared.Go), transport retry class with per-attempt deadlines, TikTok download via the tikwm mirror with yt-dlp fallback.
 - [devlog/11_summarize_persistence.md](devlog/11_summarize_persistence.md) - 2026-09-13: opt-in durable mirror of the summarize window (SUMMARIZE_PERSIST), separate bbolt file, batched writes, restore at startup.
 - [devlog/12_owner_summarize_and_shorts.md](devlog/12_owner_summarize_and_shorts.md) - 2026-09-25: `/summarize` regated to the bot owner (`BOT_OWNER_ID`), YouTube Shorts downloaded through yt-dlp with Deno and reposted as video; deployed locally at `6fcf601` (no push/PR). **Shorts portion rolled back the same day - see devlog 13.**
-- [devlog/13_youtube_shorts_rollback.md](devlog/13_youtube_shorts_rollback.md) - 2026-09-25: Shorts download/repost rolled back after two live `Sign in to confirm you're not a bot` failures (yt-dlp 2026.03.17 and 2026.08.19); owner declined cookies/PO-token auth; sanitizer restored to `si=` only; owner-only `/summarize` kept. Rollback binary pending orchestrator verification/deploy.
+- [devlog/13_youtube_shorts_rollback.md](devlog/13_youtube_shorts_rollback.md) - 2026-09-25: Shorts download/repost rolled back after two live `Sign in to confirm you're not a bot` failures (yt-dlp 2026.03.17 and 2026.08.19); owner declined cookies/PO-token auth; sanitizer restored to `si=` only; owner-only `/summarize` kept; rollback deployed locally at `84d5d89`.
 
 ## Removed surfaces (code deleted; docs deleted with them)
 

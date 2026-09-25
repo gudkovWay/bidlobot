@@ -1,4 +1,4 @@
-# Handoff - 2026-09-25 (Shorts rolled back; rollback pending verification/deploy)
+# Handoff - 2026-09-25 (Shorts rollback deployed locally)
 
 ## 1. Current state
 
@@ -8,21 +8,19 @@
 - The live deployment is the owner's desktop user service:
   `bidlobot.service`, binary `~/.local/lib/bidlobot/bin/bidlobot`, env
   `~/.config/bidlobot/env`, data `~/.local/share/bidlobot/`.
-- The service is **active/running** on the Shorts-capable binary
-  `commit=6fcf601`; the previous binary is preserved as `bidlobot.prev`
-  (commit `d9d3c48`).
+- The service is **active/running** on the rollback binary
+  `commit=84d5d89`, PID `204587`, started 2026-09-25 23:52:06 MSK.
+  The replaced Shorts-capable binary is preserved as `bidlobot.prev`
+  (commit `6fcf601`).
 - Source is local-only in worktree
   `/home/q/dev/qol/.worktrees/bidlobot/feat/local-youtube-shorts-owner-summarize`,
   branch `feat/local-youtube-shorts-owner-summarize`, base `d9d3c48`.
   No push and no PR.
-- The **YouTube Shorts download/repost feature is rolled back** in the
-  working tree: `youtube_shorts.go` is deleted, the sanitizer is restored
-  to `si=`-only. This rollback is **pending orchestrator verification
-  and deployment** - the deployed binary still carries Shorts until the
-  orchestrator builds/deploys and the final handoff is updated.
+- The **YouTube Shorts download/repost feature is rolled back and
+  deployed**: `youtube_shorts.go` is deleted and the sanitizer is
+  restored to `si=`-only behavior.
 - Kept: `8a24e34 feat(summarize): restrict digests to bot owner`.
-  Dropped: the `6fcf601` Shorts feature commit's code content (rollback
-  not yet committed).
+  Rollback: `84d5d89 revert(youtube): remove Shorts video repost`.
 
 ## 2. Why the rollback
 
@@ -71,16 +69,20 @@ X-post and generic failure behavior are unchanged. See
   is already restored; the separately named `yt-dlp.2026.03.17` copy is
   only a removable rollback artifact.
 
-## 5. Next checks (after the orchestrator verifies + deploys the rollback)
+## 5. Verification and optional live checks
 
-1. Update this handoff so the deployed commit and behavior match the
-   rolled-back source.
-2. In a supergroup, owner sends `/итог`; expect the normal digest flow.
-   A non-owner sends `/итог`; expect silence.
-3. Post a YouTube URL with `si=` (a `/shorts/<id>?si=...` is a good
-   check); expect the attributed `si=`-stripped repost and deletion.
-4. Post a `si=`-free YouTube link; expect nothing.
-5. Confirm the source file is absent and no active Go/build reference remains.
+- Verified before deployment: `go build ./...`, `go vet ./...`,
+  `gofmt -l internal/bot/routes.go internal/bot/youtube_sanitizer.go`,
+  `git diff --check`, and `bash docs/llm/validate.sh` all succeeded.
+  The docs validator reported 0 errors, 0 warnings, and 24 stale queue
+  entries. Tests were not run because they were not requested.
+- After restart, systemd reports `active/running`, PID `204587`,
+  `ExecMainStatus=0`; the journal records commit `84d5d89`,
+  authentication, summarize-window restore, and polling startup.
+- Optional Telegram checks: owner `/итог` follows the normal digest
+  flow; non-owner `/итог` is silent; a YouTube URL carrying `si=` is
+  reposted without `si=` and the original is deleted; an `si=`-free
+  YouTube URL triggers nothing.
 
 ## 6. Deliberate non-goals and drift
 
@@ -97,9 +99,10 @@ X-post and generic failure behavior are unchanged. See
 
 - `BOT_OWNER_ID` is load-bearing for admission and summaries; missing or
   invalid configuration is a startup error.
-- The deployed binary still reposts Shorts as video until the rollback
-  is deployed - do not treat a Shorts repost as a regression signal
-  before then.
+- The live binary no longer contains the Shorts download/repost path.
+  `bidlobot.prev` intentionally preserves commit `6fcf601` only as the
+  standard rollback copy; do not restore it unless Shorts behavior is
+  explicitly wanted.
 - A second process cannot open `bidlobot.db` while the live process
   holds its exclusive lock; a second poller causes a 409 race.
 - Never log summarize message text; with persistence it belongs only in

@@ -375,26 +375,29 @@ both yt-dlp 2026.03.17 and 2026.08.19); the owner declined cookies /
 PO-token auth and ordered a full rollback
 ([devlog/13_youtube_shorts_rollback.md](devlog/13_youtube_shorts_rollback.md)).
 
-State at this writing:
+Deployed state:
 
 - The **rollback code** (Shorts download/repost removed; sanitizer
-  restored to `si=` only) lives in the worktree
+  restored to `si=` only) is commit `84d5d89` in worktree
   `/home/q/dev/qol/.worktrees/bidlobot/feat/local-youtube-shorts-owner-summarize`
   on branch `feat/local-youtube-shorts-owner-summarize`, based on
-  `d9d3c48`. Nothing is pushed to `origin` and no PR exists. It is
-  **pending orchestrator verification and deployment**.
-- The **desktop unit still runs the Shorts-capable commit `6fcf601`**
-  binary; the rollback binary is not deployed yet. The previous
-  `d9d3c48` binary is preserved as `bidlobot.prev`.
-- The private-dir `yt-dlp` executable is already restored to the
-  pre-feature `2026.03.17` version. The temporary switch to system
-  `2026.08.19` is over; the separately named `yt-dlp.2026.03.17` copy
-  remains only as a removable rollback artifact.
+  `d9d3c48`. Nothing is pushed to `origin` and no PR exists.
+- The desktop unit runs commit `84d5d89`: `active/running`, PID
+  `204587`, started 2026-09-25 23:52:06 MSK with
+  `ExecMainStatus=0`. The journal confirms authentication,
+  summarize-window restore, and polling startup. The previous
+  Shorts-capable commit `6fcf601` binary is preserved as
+  `bidlobot.prev`.
+- The private-dir `yt-dlp` executable is restored to the pre-feature
+  `2026.03.17` version. The temporary switch to system `2026.08.19`
+  is over; the separately named `yt-dlp.2026.03.17` copy remains only
+  as a removable rollback artifact.
 - `~/.config/bidlobot/env` defines `BOT_OWNER_ID` (value withheld),
   `SUMMARIZE_PERSIST=1` and `SUMMARIZE_PERSIST_TTL=168h`.
-
-Tests were not run for the rollback at this writing; verification is
-the orchestrator's single post-batch step.
+- Verification succeeded: `go build ./...`, `go vet ./...`, targeted
+  `gofmt -l`, `git diff --check`, and `bash docs/llm/validate.sh`
+  (0 errors, 0 warnings; 24 stale queue entries). Tests were not run
+  because they were not requested.
 
 ## Operational footguns
 
