@@ -11,7 +11,7 @@ touches:
   - internal/testutil/
   - internal/text/
 written: 2026-05-14
-updated: 2026-09-13
+updated: 2026-09-25
 ---
 
 # Architecture
@@ -38,7 +38,8 @@ internal/
     captcha.go         new-member captcha wiring (opt-in)
     deferred.go        /flush per-user retry queue
     summarize.go       /summarize + /итог handler
-    youtube_sanitizer.go  YT si= strip (delete+repost)
+    youtube_sanitizer.go  YT si= strip (delete+repost) + Shorts pre-check
+    youtube_shorts.go     explicit YT Shorts: yt-dlp download + video repost
     tiktok_repost.go      TikTok video repost (mirror -> yt-dlp)
     tiktok_source.go      tikwm mirror: resolve + stream the MP4
     xpost.go              X/Twitter sidecar client
@@ -118,12 +119,15 @@ internal/
 
 Middleware order in `routes.go:41-149` (root `loggingHandler`
 first): `privateGroup` (/help /start /chats) and `sgGroup`
-(supergroup). `sgGroup.Use` chain = `membershipMessageMiddleware` ->
+`sgGroup` (supergroup). `sgGroup.Use` chain = `membershipMessageMiddleware` ->
 `statsCountHandler` -> `summarizeRecorder` (if wired) ->
 `youtubeSanitizer` -> `tiktokReposter` -> `xpostReposter`. The
 observers MUST see the original human message before the sanitizer
-deletes+reposts it. Game routes register before the observers so their
-slash commands and callbacks coexist.
+deletes+reposts it. `youtubeSanitizer` is one middleware with two
+behaviors: an explicit Shorts link is handed to `youtube_shorts.go`
+(async download+repost) and otherwise the `si=` path runs. Game
+routes register before the observers so their slash commands and
+callbacks coexist.
 
 App-level middleware in `Run`: `recoverMiddleware` (outermost - a panic
 in any route below becomes a log record instead of a dead process),
@@ -136,8 +140,8 @@ Side-effect axes:
   referrals, summarize placeholder/edit, sanitizer/reposter sends,
   captcha mute/kick/welcome, onboarding. This keeps high-volume public
   paths inside Telegram's 20 msg/min/chat budget under load.
-- Heavy media work (TikTok download/upload, xpost render/videos,
-  captcha welcome animation) runs **fire-and-forget** through
+- Heavy media work (TikTok download/upload, YouTube Shorts
+  download/upload, xpost render/videos, captcha welcome animation) runs **fire-and-forget** through
   `shared.Go(log, name, fn)`, which spawns the goroutine behind a
   `recover` so a panic there cannot kill the process; the body builds its
   own `context.Background()` because the update loop is sequential and a
@@ -206,9 +210,9 @@ never enters `backups/` (the backup job copies the main file whole;
    reintroduce public moderation, advertise it in
    `helpSupergroup`/`setCommands` group scope, or route destructive
    actions through inline (inline posts publicly).
-4. **Content middlewares are repost-then-delete (YT, TikTok) or
-   add-only (xpost)**, never delete-first. A failed repost leaves the
-   original intact.
+4. **Content middlewares are repost-then-delete (YT, YT Shorts,
+   TikTok) or add-only (xpost)**, never delete-first. A failed repost
+   leaves the original intact.
 5. **No third-party pings.** No user-triggered command emits
    `@handle` / `tg://user?id=` / `text_mention` for a third party;
    attribution headers render inert display names.
@@ -225,6 +229,14 @@ never enters `backups/` (the backup job copies the main file whole;
 10. **Privacy + admin guard inputs.** Without `setprivacy: disabled`
     the sanitizer/reposters/summarize recorder never see message
     content; `cmd/probe` reports the flag.
+11. **Owner-only summarize.** `/summarize` and `/итог` are gated by
+    `App.botOwnerID` (from the required `BOT_OWNER_ID`) - a plain id
+    comparison, never a hardcoded number, never a group-admin check.
+    Non-owners (admins included) get no reply
+    ([45_summarize.md](45_summarize.md)).
+12. **No other retry queue.** Only TikTok exports and summarize calls
+    are enqueued on `deferred_jobs`; YouTube Shorts failures decline
+    and keep the original ([55_youtube_sanitizer.md](55_youtube_sanitizer.md)).
 
 ## Subscription set
 
@@ -264,6 +276,8 @@ No `edited_message`, no `chat_join_request`.
 | TikTok too-large/send fail | `tiktok_repost.go` | public decline note; original kept |
 | xpost any failure | `xpost.go` | decline note; original kept (never deleted) |
 | YT sanitizer repost fail | `youtube_sanitizer.go` | original left intact |
+| YT Shorts temp-dir/download/stat/audio/send fail | `youtube_shorts.go` | decline note (`sendDecline` + `publicPureFailure`); original kept; never queued |
+| YT Shorts incompatible/oversized result | `youtube_shorts.go` | decline note; original kept (requires combined MP4/H.264, max 50 MiB) |
 | summarize provider fail | `summarize.go` | enqueue to deferred queue; placeholder stays |
 | summarize timeout/budget | `summarize.go` | Russian error, lower N |
 | Game/stats flood | `cooldown.gateMsg` | silent drop (bounded notice) |
@@ -276,16 +290,21 @@ No `edited_message`, no `chat_join_request`.
 
 `internal/bot/deferred.go` + `storage/deferred_repo.go`. Per-user
 retry queue for failed **TikTok exports** and **summarize** calls
-(commits 81f45c9, 47cdd99). Public `/flush` (30s cooldown) processes
-the caller's own jobs sequentially in a background goroutine: tiktok
--> `tryTikTokExport` (full download->validate->upload->delete cycle;
-error keeps the job), summarize -> `retrySummarize` (re-runs
-`Summarize`, edits the placeholder with 25s timeout). Success ->
-`Delete(key)`. Storage: `deferred_jobs`, key `dj:<zero-padded
-UnixNano>` (lexicographic FIFO), JSON `DeferredJob{user_id, type,
-chat_id, message_id, payload, created_at}`, TTL 48h, GC every 10 min.
-Always wired; nil queue (tests) -> failures fall back to decline
-replies.
+(commits 81f45c9, 47cdd99) - and **only** those: YouTube Shorts
+failures decline and keep the original, with no queue type added
+([55_youtube_sanitizer.md](55_youtube_sanitizer.md)). Public `/flush`
+(30s cooldown) processes the caller's own jobs sequentially in a
+background goroutine: tiktok -> `tryTikTokExport` (full
+download->validate->upload->delete cycle; error keeps the job),
+summarize -> `retrySummarize` (re-runs `Summarize`, edits the
+placeholder with 25s timeout). A summarize job owned by anyone other
+than the current `BOT_OWNER_ID` is deleted without provider work,
+covering jobs created before the owner-only cutover. A successful
+retry (or unauthorized-job discard) -> `Delete(key)`. Storage:
+`deferred_jobs`, key `dj:<zero-padded UnixNano>` (lexicographic FIFO),
+JSON `DeferredJob{user_id, type, chat_id, message_id, payload,
+created_at}`, TTL 48h, GC every 10 min. Always wired; nil queue
+(tests) -> failures fall back to decline replies.
 
 ## Where to add a feature
 

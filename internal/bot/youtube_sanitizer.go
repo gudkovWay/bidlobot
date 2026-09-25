@@ -14,6 +14,13 @@ package bot
 // is never touched.
 //
 // Design notes / documented v1 gaps:
+//   - YouTube Shorts: a message carrying an explicit /shorts/<id> link
+//     is handled by youtube_shorts.go (download + video repost) instead
+//     of by this file. That check runs first, from the same middleware,
+//     and the si= path is skipped for such a message so one message
+//     never produces two reposts. A `si=` Short leaves the group with
+//     the tracking param still present, which is the price of that
+//     one-action-per-message rule.
 //   - text_link entities: the URL lives in entity.URL, not in the
 //     message text. Rewriting it would require splicing the visible
 //     text at UTF-16 offsets, which corrupts multi-plane text. We do
@@ -289,8 +296,12 @@ const (
 // statsCountHandler's use in routes.go (a th.Handler closing over App).
 //
 // Per incoming update.Message in a supergroup it:
-//   - skips bots / anonymous-admin / channel-as-sender / no-sender,
-//     consistent with the stats exclusion set;
+//   - hands an explicit YouTube Shorts link to the video pipeline in
+//     youtube_shorts.go (async, panic-contained) and SKIPS the sanitizer
+//     for that update, so one message never produces both a video repost
+//     and a link repost/reply;
+//   - otherwise skips bots / anonymous-admin / channel-as-sender /
+//     no-sender, consistent with the stats exclusion set;
 //   - computes sanitized text over (Text+Entities) and
 //     (Caption+CaptionEntities); if nothing changed, passes through;
 //   - on change: best-effort deletes the original via the rate-limited
@@ -305,6 +316,17 @@ const (
 // the wiring notes returned with this change.
 func youtubeSanitizer(a *App) th.Handler {
 	return func(thctx *th.Context, update telego.Update) error {
+		// Explicit Shorts first: download+repost the video itself. The
+		// job outlives this handler, so it gets context.Background() -
+		// the per-update ctx is cancelled as soon as the handler
+		// returns (same contract as the TikTok reposter).
+		if act, shortsURL := youtubeShortsDecision(update.Message); act {
+			shared.Go(a.log, "youtube-shorts", func() {
+				processYouTubeShort(context.Background(), a.sanitizerSender(), a.log,
+					a.repReactor, update.Message, shortsURL, "")
+			})
+			return thctx.Next(update)
+		}
 		if act, newText, newCaption := sanitizeDecision(update.Message); act {
 			handleSanitize(thctx.Context(), a.sanitizerSender(), a.log,
 				update.Message, newText, newCaption)
