@@ -66,8 +66,10 @@
   `SUMMARIZE_PERSIST=1`, `SUMMARIZE_PERSIST_TTL=168h`, the Pi/OMP binary and
   captcha configuration. The owner value is intentionally not copied into
   source or docs.
-- The user unit prepends `~/.local/lib/bidlobot/bin` to PATH. It therefore
-  resolves pinned `yt-dlp 2026.03.17`, not the system yt-dlp.
+- The user unit prepends `~/.local/lib/bidlobot/bin` to PATH. After the first
+  live Shorts download failed, this entry was switched from standalone
+  `yt-dlp 2026.03.17` to `/usr/bin/yt-dlp 2026.08.19`; the old executable is
+  preserved as `yt-dlp.2026.03.17`.
 - Deno 2.9.7 is installed and is selected by the Shorts pipeline. Bun 1.4.2,
   Node 26.10.0, ffmpeg/ffprobe 9.0.2 and OMP 18.3.1 were also observed.
 - `TMPDIR=~/.local/share/bidlobot/tmp`, keeping media scratch files off the
@@ -93,9 +95,17 @@ Observed against the integrated source before deployment:
   startup log names commit `6fcf601`, authentication succeeded, summarize
   state restored and polling started.
 
-Tests were **not run**: none were requested. No live Telegram round trip was
-performed, so owner/non-owner command behavior and an actual Shorts upload
-remain operational observations for the owner, not claims in this handoff.
+Tests were **not run**: none were requested. Owner/non-owner summarize behavior
+has not been exercised live. The first live Shorts attempt is recorded below;
+it proved detection and failure handling, not a successful upload.
+
+Live incident at 23:22:44 MSK: the exact Short
+`youtube.com/shorts/dspcs6gINwA` reached commit `6fcf601`, detection succeeded
+and the download layer failed after three attempts. The decline reply and
+preserved original were expected failure behavior, not feature success. The
+journal identified obsolete `yt-dlp 2026.03.17` but the 400-character output
+preview cut off the terminal error. The local PATH entry now resolves
+`2026.08.19`; a repeat of the same link is the pending one-variable A/B check.
 
 ## 5. Next checks
 
@@ -126,8 +136,8 @@ remain operational observations for the owner, not claims in this handoff.
   invalid configuration is a startup error.
 - Owner-only means silence for everyone else; do not add an authorization
   error message.
-- Keep pinned yt-dlp ahead of `/usr/bin` in the unit PATH. Do not add
-  `--remote-components`.
+- Keep the local yt-dlp entry on the maintained system release; the former
+  `2026.03.17` binary is rollback-only. Do not add `--remote-components`.
 - Shorts remains repost-first/delete-after-success and intentionally has no
   deferred queue.
 - A second process cannot open `bidlobot.db` while the live process holds its

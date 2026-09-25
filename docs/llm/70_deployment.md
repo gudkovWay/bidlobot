@@ -62,15 +62,16 @@ authority.
   `~/.local/share/bidlobot/tmp` so TikTok/Shorts scratch files stay
   off the host tmpfs.
 - **Tool PATH**: the unit prepends `~/.local/lib/bidlobot/bin` and the
-  OMP bin dir ahead of the system PATH. The private dir holds pinned
-  `yt-dlp 2026.03.17` (deliberately older than system
-  `/usr/bin/yt-dlp 2026.08.19`, whose TikTok extractor regressed -
-  yt-dlp issue #17403). The Shorts downloader resolves that pinned
-  binary and selects `/usr/bin/deno` as its supported JS runtime;
-  `/usr/bin/bun` is newer than yt-dlp's supported Bun range and is
-  therefore not selected. `ffmpeg`/`ffprobe` come from the host and
-  `omp` from `~/.cache/.bun/bin`. The compose image instead uses its
-  pinned supported Bun as the fallback runtime ([Image](#image)).
+  OMP bin dir ahead of the system PATH. After the first live Shorts
+  attempt failed in the download layer, the private-dir `yt-dlp` entry
+  was atomically switched to `/usr/bin/yt-dlp 2026.08.19`; the former
+  standalone `2026.03.17` executable is preserved as
+  `yt-dlp.2026.03.17`. The process selects `/usr/bin/deno` as its
+  supported JS runtime; `/usr/bin/bun` is newer than yt-dlp's supported
+  Bun range and is therefore not selected. `ffmpeg`/`ffprobe` come from
+  the host and `omp` from `~/.cache/.bun/bin`. The compose image still
+  uses its separately pinned yt-dlp and supported Bun fallback
+  ([Image](#image)).
 - **Build**: the binary is built from the checkout with
   `-ldflags "-X main.version=local -X main.commit=$(git rev-parse --short HEAD)"`
   so `/version` and the startup log name the exact commit.
@@ -391,18 +392,25 @@ Host prerequisites observed during the deploy:
 
 - `~/.config/bidlobot/env` defines `BOT_OWNER_ID` (value withheld),
   `SUMMARIZE_PERSIST=1` and `SUMMARIZE_PERSIST_TTL=168h`.
-- The unit PATH resolves pinned `yt-dlp 2026.03.17` from
-  `~/.local/lib/bidlobot/bin`, not system yt-dlp. The Shorts path
-  selected installed Deno 2.9.7; Bun 1.4.2, Node 26.10.0,
+- The first live Short at 23:22:44 MSK reached the deployed pipeline but
+  failed in the download layer after three attempts. The journal named
+  `yt-dlp 2026.03.17` and warned that it was older than 90 days; the
+  captured 400-character output omitted the terminal error.
+- The private-dir `yt-dlp` entry now resolves `/usr/bin/yt-dlp
+  2026.08.19`; the old `2026.03.17` binary is retained as
+  `yt-dlp.2026.03.17` for rollback. This is a one-variable operational
+  A/B; the daemon itself remains active and need not restart because
+  each download resolves and executes a new child process.
+- The Shorts path selects installed Deno 2.9.7. Bun 1.4.2, Node 26.10.0,
   ffmpeg/ffprobe 9.0.2 and OMP 18.3.1 were also present.
 - `go build ./...` and `go vet ./...` exited 0 under a capped user
   systemd scope. Changed Go files produced no `gofmt -l` output;
   `git diff --check` exited 0; `docs/llm/validate.sh` exited 0 with
   its stale-spec queue.
 
-Tests were not run because they were not requested. The service startup
-is observed; a live Telegram owner/non-owner `/итог` comparison and an
-actual Shorts upload remain manual operational checks.
+Tests were not run because they were not requested. The same Short must
+be posted again to establish whether updating yt-dlp fixes the download;
+until then the user-visible outcome remains unverified.
 
 ## Operational footguns
 
