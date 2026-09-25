@@ -12,25 +12,86 @@ touches:
   - .omp/skills/bidlobot-deploy/scripts/status.sh
   - cmd/bidlobot/
 written: 2026-05-14
-updated: 2026-09-13
+updated: 2026-09-25
 ---
 
 # Deployment
 
-Production runs as a docker-compose stack with a **single service**:
-`bot` (the Go binary). Single bot replica (Telegram allows exactly one
-getUpdates poller per token). Named volume for bbolt, internal
-healthcheck (no host ports published), non-root container with tini as
-PID 1. Revised 2026-08-16 (xpost rework: the `xshot` Puppeteer sidecar
-was retired; the bot resolves X posts via the FixTweet API and
-downloads twimg media directly).
+Two shapes exist, and they are not equivalent:
+
+1. **Production today: a systemd --user unit on the owner's desktop**
+   (`bidlobot.service`) - see
+   [Desktop systemd deployment (current production)](#desktop-systemd-deployment-current-production).
+2. **The docker-compose stack** (this document, from
+   [Compose stack](#compose-stack) on): a single service `bot`
+   (the Go binary), single bot replica (Telegram allows exactly one
+   getUpdates poller per token), named volume for bbolt, internal
+   healthcheck (no host ports published), non-root container with tini
+   as PID 1. Revised 2026-08-16 (xpost rework: the `xshot` Puppeteer
+   sidecar was retired; the bot resolves X posts via the FixTweet API
+   and downloads twimg media directly).
+
+The compose path stays in the repo (Dockerfile + `docker-compose.yml`,
+CI image build) and is the way to run the bot on a container host. It
+is **not** where the bot runs right now: the live deployment was moved
+off the Docker/VM100 host to the desktop systemd unit.
+
+## Desktop systemd deployment (current production)
+
+Observed state as of the 2026-09-13 session (see
+[handoff.md](handoff.md)); treat the unit files on the machine as the
+authority.
+
+- **Unit**: `bidlobot.service`, `systemd --user` - `Type=simple`,
+  `Restart=always` + `RestartSec=10s`, `KillSignal=SIGTERM`,
+  `TimeoutStopSec=30s` (matches `App.ShutdownTimeout` + in-flight drain
+  + bbolt close), `EnvironmentFile=%h/.config/bidlobot/env`,
+  `WorkingDirectory=%h/.local/share/bidlobot`. Logs:
+  `journalctl --user -u bidlobot.service`.
+- **Binary**: `~/.local/lib/bidlobot/bin/bidlobot`, with the previous
+  build kept next to it as `bidlobot.prev` (rollback = put it back and
+  restart).
+- **Env**: `~/.config/bidlobot/env` (systemd `EnvironmentFile`), not a
+  compose `env_file`. It carries the required `TG_BOT_TOKEN` and
+  `BOT_OWNER_ID`, the provider key `DEEPSEEK_API_KEY`, and (on this
+  machine) `SUMMARIZE_PERSIST=1` with `SUMMARIZE_PERSIST_TTL=168h`.
+  The owner's numeric Telegram id lives **only** here - never in the
+  source.
+- **Data**: `~/.local/share/bidlobot/` holds `bidlobot.db`, plus
+  `summarize.db` when `SUMMARIZE_PERSIST=1`. `TMPDIR` points at
+  `~/.local/share/bidlobot/tmp` so TikTok/Shorts scratch files stay
+  off the host tmpfs.
+- **Tool PATH**: the unit prepends `~/.local/lib/bidlobot/bin` and the
+  OMP bin dir ahead of the system PATH. The private dir holds pinned
+  `yt-dlp 2026.03.17` (deliberately older than system
+  `/usr/bin/yt-dlp 2026.08.19`, whose TikTok extractor regressed -
+  yt-dlp issue #17403). The Shorts downloader resolves that pinned
+  binary and selects `/usr/bin/deno` as its supported JS runtime;
+  `/usr/bin/bun` is newer than yt-dlp's supported Bun range and is
+  therefore not selected. `ffmpeg`/`ffprobe` come from the host and
+  `omp` from `~/.cache/.bun/bin`. The compose image instead uses its
+  pinned supported Bun as the fallback runtime ([Image](#image)).
+- **Build**: the binary is built from the checkout with
+  `-ldflags "-X main.version=local -X main.commit=$(git rev-parse --short HEAD)"`
+  so `/version` and the startup log name the exact commit.
+- **Restart**: `systemctl --user restart bidlobot`.
+- **Stale helper**: `.omp/skills/bidlobot-deploy/` still describes the
+  Docker/VM100 flow and does **not** match this deployment. Known
+  drift, not yet reconciled.
 
 ## Prerequisites
+
+Shared by both shapes: the bot token, `BOT_OWNER_ID`, `/setinline`, and
+`/setprivacy`. The Docker/Compose requirement applies to the compose
+path only.
 
 - Linux host with Docker 24+ and Compose v2 (`docker compose version`).
 - A bot token from `@BotFather`.
 - The **owner's Telegram user ID** (`BOT_OWNER_ID`) - required at
-  startup; only this user may add the bot to a chat.
+  startup; only this user may add the bot to a chat, and it is also
+  the sole authorization for `/summarize` and `/итог`
+  ([45_summarize.md](45_summarize.md)). The value lives in the
+  environment; it is never hardcoded in the binary.
 - `/setinline` Enabled with a placeholder string (read-only launcher).
 - `/setprivacy` - a **hard prerequisite now**: the content features
   (YouTube `si=` sanitizer, TikTok repost, X-post repost, summarize
@@ -48,16 +109,21 @@ downloads twimg media directly).
   dependency is pure Go). Build cache via BuildKit. Builds `bidlobot`,
   `bidlobot-backup`, `bidlobot-probe` into `/out`.
 - `debian:bookworm-slim` runtime. Installs `bash ca-certificates curl
-  ffmpeg tini tzdata unzip wget` (ffmpeg/ffprobe for the TikTok
-  audio check), **yt-dlp pinned release** (2026.03.17, sha256-checked
+  ffmpeg tini tzdata unzip wget` (ffmpeg/ffprobe for the TikTok and
+  YouTube Shorts audio checks), **yt-dlp pinned release** (2026.03.17, sha256-checked
   at build; a newer release can be pinned via `YT_DLP_VERSION` arg -
   the pin holds until upstream fixes the TikTok extractor regression,
   yt-dlp issue #17403), and **Bun 1.3.14 +
   `@oh-my-pi/pi-coding-agent` 16.3.6** (the `omp` CLI on PATH,
   version-checked at build). yt-dlp is the **fallback** TikTok source;
   the primary path is the tikwm mirror
-  ([56_tiktok_repost.md](56_tiktok_repost.md)). Runs as `bidlobot`
-  (UID 65532), `WORKDIR /var/lib/bidlobot`, tini as PID 1,
+  ([56_tiktok_repost.md](56_tiktok_repost.md)). It is the **only**
+  source for the YouTube Shorts repost. Runtime selection prefers Deno
+  when present and otherwise uses this pinned, supported Bun
+  (`--js-runtimes bun`, [55_youtube_sanitizer.md](55_youtube_sanitizer.md)).
+  No `--remote-components` is used, so the downloader never fetches
+  unpinned code at runtime. Runs as `bidlobot` (UID 65532),
+  `WORKDIR /var/lib/bidlobot`, tini as PID 1,
   HEALTHCHECK on the loopback `/health`.
 
 The `bidlobot-backup` binary stays in the image but cannot snapshot a
@@ -182,6 +248,14 @@ Verifiable upgrade facts:
   (sha256 mismatch, missing binary) fails CI / the deploy build before
   it reaches prod.
 
+**Desktop systemd equivalent** (the shape actually in production):
+build in the checkout with the ldflags above, copy the result over
+`~/.local/lib/bidlobot/bin/bidlobot` (moving the old binary to
+`bidlobot.prev` first), then `systemctl --user restart bidlobot` and
+watch `journalctl --user -u bidlobot.service -n 50`. New buckets are
+just as idempotent here; the SQLite-style migration step does not
+exist in either shape.
+
 ## Health and version
 
 ```sh
@@ -295,6 +369,40 @@ VOL=$(docker volume inspect -f '{{.Mountpoint}}' bidlobot-data)
 cp /var/backups/bidlobot/bidlobot-<ts>.db "$VOL/bidlobot.db"
 docker compose start bot
 ```
+
+## Change status (2026-09-25, local only)
+
+The owner-gated `/summarize` and YouTube Shorts repost are deployed to
+the desktop user service from source commit `6fcf601`. The source lives
+in worktree
+`/home/q/dev/qol/.worktrees/bidlobot/feat/local-youtube-shorts-owner-summarize`
+on branch `feat/local-youtube-shorts-owner-summarize`, based on
+`d9d3c48`. Nothing is pushed to `origin` and no PR exists.
+
+The deploy build used
+`-ldflags "-X main.version=local -X main.commit=6fcf601"`. The previous
+`d9d3c48` binary is preserved as `bidlobot.prev`. After
+`systemctl --user restart bidlobot.service` at 23:05:56 MSK, the unit
+was observed `active/running`; its startup log named commit `6fcf601`,
+authenticated with Telegram, restored the summarize window and entered
+polling.
+
+Host prerequisites observed during the deploy:
+
+- `~/.config/bidlobot/env` defines `BOT_OWNER_ID` (value withheld),
+  `SUMMARIZE_PERSIST=1` and `SUMMARIZE_PERSIST_TTL=168h`.
+- The unit PATH resolves pinned `yt-dlp 2026.03.17` from
+  `~/.local/lib/bidlobot/bin`, not system yt-dlp. The Shorts path
+  selected installed Deno 2.9.7; Bun 1.4.2, Node 26.10.0,
+  ffmpeg/ffprobe 9.0.2 and OMP 18.3.1 were also present.
+- `go build ./...` and `go vet ./...` exited 0 under a capped user
+  systemd scope. Changed Go files produced no `gofmt -l` output;
+  `git diff --check` exited 0; `docs/llm/validate.sh` exited 0 with
+  its stale-spec queue.
+
+Tests were not run because they were not requested. The service startup
+is observed; a live Telegram owner/non-owner `/итог` comparison and an
+actual Shorts upload remain manual operational checks.
 
 ## Operational footguns
 
