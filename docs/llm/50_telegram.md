@@ -11,9 +11,10 @@ touches:
   - internal/bot/membership.go
   - internal/bot/captcha.go
   - internal/bot/routes.go
+  - internal/bot/summarize.go
   - internal/storage/migrate.go
 written: 2026-05-14
-updated: 2026-09-12
+updated: 2026-09-25
 ---
 
 # Telegram API Reference
@@ -40,7 +41,10 @@ Messages from anonymous admins arrive with `from.id == 1087968824` (GroupAnonymo
 Detection: `from.id == 1087968824` or `from.is_bot == true && from.username == "GroupAnonymousBot"`.
 
 - Stats: not counted; content middlewares skip; summarize recorder skips.
-- `/summarize`: rejected - anonymous admins cannot invoke (no identifiable `From.ID`).
+- `/summarize`: rejected - the command is **owner-only** (`App.botOwnerID`
+  from the required `BOT_OWNER_ID`), and an anonymous admin's implicit
+  GroupAnonymousBot id is never the owner id. It is no longer an
+  admin-gated command ([45_summarize.md](45_summarize.md)).
 - Captcha: never fires for anonymous-admin joins.
 
 ## Linked channel messages
@@ -64,7 +68,8 @@ Set via `setMyCommands` at startup (`setup.go`):
 Telegram resolves most-specific scope per user. Cyrillic aliases
 (`/итог`, `/ref`, `/ref-reg`) are typed-only: `setMyCommands` rejects
 non-ASCII names. Command menu visibility only - the bot validates
-permissions server-side (AdminCache for `/summarize`/`/refreport`).
+permissions server-side: `/summarize` against the configured owner
+(`BOT_OWNER_ID`), `/refreport` against `AdminCache`.
 
 ## Bot onboarding
 
@@ -109,7 +114,7 @@ Telegram 429 error: respect `retry_after` field (seconds) + 10% jitter. `retry_a
 
 Retry classes in `shared/retry` (all with 10% jitter, caller cancellation never retried): 429 -> one retry after `retry_after`; 5xx (Telegram API error or bare HTTP status) -> 1/2/4/8s ladder, 4 attempts; transport (DNS, connect, TLS, read/write timeout, connection reset) -> 1/2/4s ladder, 3 attempts. Every attempt runs under its own deadline: 20s for control calls, 240s for media sends (`tgclient`). The outbound HTTP client bounds a call even when the caller passes a deadline-less context: 65s read (above the 30s long poll), 240s write.
 
-Per-user command cooldown (`internal/bot/cooldown.go`, applied by `gateMsg` to games, `/stats`, `/summarize`, `/refs*`, `/flush`): a user may trigger a given command once per its window (5-30s). An over-frequency call is dropped (handler not run) but is **not** fully silent: exactly **one** "slow down" notice is sent per window per (user,command) - bounded so a flooder cannot amplify, while a normal user still gets feedback. A fresh allowed call resets the notice state. The notice goes through the rate-limited sender; absent sender (minimal/test app) -> no notice, drop stays silent.
+Per-user command cooldown (`internal/bot/cooldown.go`, applied by `gateMsg` to games, `/stats`, `/refs*`, `/flush`): a user may trigger a given command once per its window (5-30s). An over-frequency call is dropped (handler not run) but is **not** fully silent: exactly **one** "slow down" notice is sent per window per (user,command) - bounded so a flooder cannot amplify, while a normal user still gets feedback. A fresh allowed call resets the notice state. `/summarize` and `/итог` are the exception: `handleSummarize` authorizes `BOT_OWNER_ID` first, then applies the shared 30s cooldown internally and silently, so a non-owner never consumes cooldown state or receives a notice. Notices go through the rate-limited sender; absent sender (minimal/test app) -> no notice, drop stays silent.
 
 ## Message formatting
 
@@ -153,9 +158,10 @@ Signal: SIGTERM or SIGINT.
 4. Close DB connection
 5. Exit
 
-Heavy media goroutines (TikTok/xpost/captcha welcome) are NOT tracked -
-best-effort, may be lost on shutdown. They are launched through
-`shared.Go`, so a panic inside one is logged instead of killing the process.
+Heavy media goroutines (TikTok/xpost/YouTube Shorts/captcha welcome)
+are NOT tracked - best-effort, may be lost on shutdown. They are
+launched through `shared.Go`, so a panic inside one is logged instead
+of killing the process.
 
 ## Logging
 

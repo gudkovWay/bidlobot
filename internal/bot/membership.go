@@ -63,8 +63,7 @@ func membershipChatMemberHandler(svc *membership.Service, adminCache *shared.Adm
 // promoted to administrator. It tells members what commands are available.
 const msgOnboardingAdmin = "<b>BidloBot</b> подключён.\n\n" +
 	"Статистика и игры: /stats, /dice, /quiz.\n" +
-	"Администраторам: /summarize - итог чата через AI."
-
+	"Владельцу: /summarize - итог чата через AI."
 const unauthorizedAdmissionNoticeLimit uint64 = 2
 
 func membershipMyChatMemberHandler(svc *membership.Service, app *App, log *slog.Logger) th.ChatMemberUpdatedHandler {

@@ -11,7 +11,6 @@ const (
 	// Chat summarization (/summarize). All plain text: the result is
 	// posted publicly and the model is untrusted, so no message on this
 	// path ever carries a ParseMode.
-	ErrSummarizeAnon          = "Суммаризация недоступна в анонимном режиме. Отключите 'Remain Anonymous' и повторите."
 	MsgSummarizeNotConfigured = "Суммаризация не настроена: бот не смог запустить Pi."
 	MsgSummarizeBusy          = "Уже собираю итог для этого чата - дождитесь результата."
 	MsgSummarizeEmpty         = "Пока нечего суммировать: бот слушает чат только с момента запуска, накопленных сообщений нет."

@@ -63,6 +63,22 @@ func (a *App) flushDeferredJobs(userID int64, reportChatID int64, jobs []storage
 	snd := a.sanitizerSender()
 	succeeded, failed := 0, 0
 	for _, job := range jobs {
+		// Jobs created before the owner-only cutover may belong to a
+		// former group admin. Drop them instead of allowing /flush to
+		// bypass the current authorization policy and spend provider
+		// budget. Deletion failure counts as a retained failure.
+		if job.Type == storage.DeferredSummarize && job.UserID != a.botOwnerID {
+			if err := a.deferredQ.Delete(ctx, job.Key); err != nil {
+				a.log.Warn("flush: unauthorized summarize job delete failed",
+					"user_id", job.UserID, "error", err)
+				failed++
+			} else {
+				a.log.Info("flush: discarded unauthorized summarize job",
+					"user_id", job.UserID)
+				succeeded++
+			}
+			continue
+		}
 		var err error
 		switch job.Type {
 		case storage.DeferredTikTok:

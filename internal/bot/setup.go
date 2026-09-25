@@ -12,7 +12,7 @@ func setCommands(ctx context.Context, bot *telego.Bot, ownerID int64) error {
 	// published only in the owner's private chat.
 	groupCommands := []telego.BotCommand{
 		{Command: "stats", Description: "Статистика чата (top/today/month)"},
-		{Command: "summarize", Description: "Итог последних N сообщений (для админов)"},
+		{Command: "summarize", Description: "Итог последних N сообщений (для владельца)"},
 		{Command: "dice", Description: "Бросить кубик"},
 		{Command: "battle", Description: "Реакция-баттл X vs Y"},
 		{Command: "quiz", Description: "Угадай язык по коду"},

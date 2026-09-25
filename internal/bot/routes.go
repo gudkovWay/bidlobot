@@ -92,8 +92,11 @@ func registerRoutes(
 		sgGroup.Use(summarizeRecorder(a.summarize))
 	}
 	// Runs after the passive observers (membership/stats see the original
-	// human message); it deletes+reposts a YouTube link carrying the si=
-	// share-tracking param. nil-tolerant against a minimal test App.
+	// human message). An explicit YouTube Shorts link is handed to the
+	// async video pipeline in youtube_shorts.go; every other message goes
+	// through the si= sanitizer, which deletes+reposts a YouTube link
+	// carrying the share-tracking param. nil-tolerant against a minimal
+	// test App.
 	sgGroup.Use(youtubeSanitizer(a))
 
 	// TikTok video repost: download, trim watermark end-screen, repost
@@ -109,17 +112,17 @@ func registerRoutes(
 	sgGroup.HandleMessage(a.gateMsg("flush", flushCooldown, a.handleFlush), th.CommandEqual("flush"))
 	sgGroup.HandleMessage(a.handleHelpSupergroup, th.CommandEqual("help"))
 
-	// /summarize is admin-only (checked inside the handler) but read-only
-	// and not chat-management, so it stays a public command like /stats.
-	// Registered even when the feature is off so the slash menu stays
-	// honest - the handler replies "not configured" to admins. The
-	// Cyrillic /итог alias uses textCommandPredicate, NOT th.CommandEqual:
-	// the latter compiles to an ASCII-only RE2 \w regex that never
-	// matches Cyrillic. It is typed-only (setMyCommands also rejects
-	// non-ASCII names so it stays out of the menu). gateMsg shares one
-	// per-user cooldown key across both spellings.
-	sgGroup.HandleMessage(a.gateMsg("summarize", summarizeCooldown, a.handleSummarize), th.CommandEqual("summarize"))
-	sgGroup.HandleMessage(a.gateMsg("summarize", summarizeCooldown, a.handleSummarize), textCommandPredicate("/итог"))
+	// /summarize is owner-only (checked inside the handler) but remains
+	// registered in the public supergroup command set. Registration stays
+	// unconditional so the menu reflects the configured feature; only the
+	// owner can receive either the result or a configuration error. The
+	// handler applies its cooldown after authorization, keeping non-owner
+	// calls completely silent. The Cyrillic /итог alias uses
+	// textCommandPredicate, NOT th.CommandEqual: the latter compiles to an
+	// ASCII-only RE2 \w regex that never matches Cyrillic. Both spellings
+	// share the same cooldown key inside handleSummarize.
+	sgGroup.HandleMessage(a.handleSummarize, th.CommandEqual("summarize"))
+	sgGroup.HandleMessage(a.handleSummarize, textCommandPredicate("/итог"))
 
 	// Referral catalog: /refs lists, /refreg registers, /refreport is
 	// admin moderation. The /ref and /ref-reg aliases share one

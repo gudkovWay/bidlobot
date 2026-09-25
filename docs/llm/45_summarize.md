@@ -3,22 +3,51 @@ id: summarize
 kind: spec
 touches:
   - internal/bot/summarize.go
+  - internal/bot/help.go
+  - internal/bot/setup.go
+  - internal/bot/membership.go
   - internal/bot/deferred.go
   - internal/domain/summarize/
   - internal/domain/summarize/persister.go
   - internal/storage/deferred_repo.go
   - internal/storage/summarize_repo.go
 written: 2026-05-15
-updated: 2026-09-13
+updated: 2026-09-25
+---
 
 # Chat summarization (`/summarize`)
 
-Admin-only, **always on**. An LLM (DeepSeek V4 Flash via the OMP/Pi
+Owner-only, **always on**. An LLM (DeepSeek V4 Flash via the OMP/Pi
 CLI) condenses the recent chat into a short Russian digest posted
 publicly in the group. Migrated 2026-07 from the Zhipu GLM HTTP
 provider to the local `omp` CLI (commits caa8f55, 848ad21, 874b198).
 No opt-in toggle: the feature is part of the image; a missing `omp`
 binary is a **startup failure** (`exec.LookPath` in main.go, `os.Exit(1)`).
+
+## Authorization: the bot owner, not group admins (2026-09-25)
+
+`/summarize` and its `/итог` alias are gated to the **single configured
+bot owner**, not to chat administrators:
+
+- The gate is `App.botOwnerID`, set from the **required** `BOT_OWNER_ID`
+  env var (`cmd/bidlobot/config.go` -> `App.SetBotOwnerID`, the same
+  value the admission gate uses - [65_admission.md](65_admission.md),
+  [70_deployment.md](70_deployment.md)).
+- The check is a plain identity comparison (`msg.From.ID !=
+  a.botOwnerID`). The Telegram user ID is **never hardcoded** in the
+  source; it exists only in the deployment environment.
+- Non-owners get **no reply** - including group admins. The
+  `shared.AdminCache` lookup that previously authorized this command
+  was removed from the summarize path (the cache itself still serves
+  other surfaces).
+- Anonymous admins cannot invoke it: their updates carry the implicit
+  GroupAnonymousBot id (`1087968824`), which is not the owner id. The
+  previous "disable Remain Anonymous" notice is gone - the update is
+  indistinguishable from any other non-owner and is dropped silently.
+- The command is still registered in the group command menu
+  (`setup.go`), and the help/onboarding copy marks it as the owner's
+  command, not the admins'. Command-menu visibility is not
+  authorization: the check above is the only gate.
 
 ## Hard constraint that shapes everything
 
@@ -104,19 +133,21 @@ Exists only when `SUMMARIZE_PERSIST=1` (default OFF).
   command if no `N`) is the **questions text**, passed to the LLM as
   additional instructions after a `---` separator; sanitized via
   `sanitizeLine` (no format injection).
-- Admin-only via `shared.AdminCache` (getChatAdministrators, 60s TTL,
-  re-checked every call). Non-admins get **no reply** (anti-spam).
-  Anonymous admins are told to disable anonymous mode.
-- Cost controls: per-admin 30s cooldown (`summarizeCooldown`, silent
-  drop); **response cache** (RAM-only, 10-minute TTL) keyed by
+- Owner-only via `App.botOwnerID` (from the required `BOT_OWNER_ID`;
+  see "Authorization" above). Non-owners - admins included - get **no
+  reply** (anti-spam). No admin API call or cooldown bookkeeping runs
+  for them.
+- Cost controls: the owner's 30s `summarizeCooldown` is applied inside
+  the handler after authorization and drops repeat calls silently;
+  **response cache** (RAM-only, 10-minute TTL) keyed by
   `(chatID, lastMsgID, N, questionsHash)`; per-chat single-flight
   (second call replies "уже собираю"); **process-wide ceiling 40
-  calls / rolling hour** across all chats/admins (`GlobalAllow`) - a
-  compromised admin is not an unbounded financial DoS. The expensive
-  call runs in a tracked background goroutine (`App.inFlight` + app
-  context): a placeholder message is posted, then
-  `EditMessageText`-swapped in place for the result; SIGTERM cancels
-  it inside the shutdown budget.
+  calls / rolling hour** across all chats (`GlobalAllow`) - the
+  provider spend stays bounded even if the owner's client loops or
+  the token leaks. The expensive call runs in a tracked background
+  goroutine (`App.inFlight` + app context): a placeholder message is
+  posted, then `EditMessageText`-swapped in place for the result;
+  SIGTERM cancels it inside the shutdown budget.
 
 ## Provider: OMP/Pi CLI
 
@@ -173,7 +204,7 @@ runes.
 
 ## Error taxonomy (user-facing, Russian)
 
-| Cause | Sentinel | Admin sees |
+| Cause | Sentinel | Owner sees |
 |-------|----------|------------|
 | provider/LLM failure | `ErrProviderFailure` | временная ошибка |
 | ctx deadline | `ErrTimeout` | не успел, меньшее N |
@@ -191,19 +222,23 @@ in `text/messages.go` but are no longer produced.
 On provider failure the job is persisted to the **per-user deferred
 queue** (`deferred_jobs`, type `summarize`, payload
 `SummarizePayload{N, Questions, PlaceholderID, Requester}`) - the
-placeholder stays up. The requester runs `/flush` to retry
+placeholder stays up. The owner runs `/flush` to retry
 (`retrySummarize` re-runs the summary and edits the placeholder with a
-25s edit timeout). Success deletes the job. See
-[60_architecture.md](60_architecture.md) "Deferred queue".
+25s edit timeout). Success deletes the job. Jobs created for a group
+admin before the owner-only cutover are deleted without provider work
+when that user runs `/flush`; deferred retry cannot bypass the current
+owner gate. See [60_architecture.md](60_architecture.md) "Deferred
+queue".
 
 ## Privacy
 
 `/summarize` sends recent member message text to an external provider
 (DeepSeek) over TLS via the omp CLI. Deliberate, owner-approved
-tradeoff for one admin-only feature, mitigated by: explicit in-message
-provenance + cost footer, key never seen/logged by the bot, memfd
-transcript (no temp file). Operators should disclose this to their
-community. The recorder needs privacy OFF to see message content.
+tradeoff for one owner-gated feature, mitigated by: explicit
+in-message provenance + cost footer, key never seen/logged by the
+bot, memfd transcript (no temp file). Owners should disclose this to
+their community. The recorder needs privacy OFF to see message
+content.
 
 Text on disk is flag-conditional: with `SUMMARIZE_PERSIST=1` raw
 member message text IS written to disk - but only to the separate
@@ -228,6 +263,19 @@ rule is untouched.
    and the caps.
 4. **Edits & deletions not tracked.** No `edited_message` subscription;
    deleted messages stay in the window until evicted.
-5. **Anonymous admins cannot invoke** (no identifiable `From.ID`).
+5. **Anonymous admins cannot invoke it** - and neither can anyone else
+   who is not the configured owner (`BOT_OWNER_ID`). There is no
+   admin fallback: the group's admins have no access to the provider
+   spend.
 6. **Times are MSK** in the transcript and footer (no per-chat tz).
 7. **Process-wide budget** (40/h) can throttle legit multi-chat use.
+
+## Change status (2026-09-25)
+
+The owner gate is a **local, unpushed** change on branch
+`feat/local-youtube-shorts-owner-summarize` (worktree
+`.worktrees/bidlobot/feat/local-youtube-shorts-owner-summarize`); the
+desktop unit still runs the previous build. Build/vet/test/docs
+validation is planned for after the batch integrates - see
+[handoff.md](handoff.md) and
+[devlog/12_owner_summarize_and_shorts.md](devlog/12_owner_summarize_and_shorts.md).

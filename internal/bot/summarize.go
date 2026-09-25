@@ -18,9 +18,9 @@ import (
 )
 
 const (
-	// summarizeCooldown gates a single admin from re-firing an expensive
-	// Pi call; over-frequency calls are dropped silently by gateMsg (a
-	// "wait" reply would itself be public spam).
+	// summarizeCooldown gates the owner from re-firing an expensive Pi
+	// call; over-frequency calls are dropped silently by gateMsg (a "wait"
+	// reply would itself be public spam).
 	summarizeDefaultN  = 200
 	summarizeMaxN      = 4000 // also bounded by the buffer's per-chat cap
 	summarizeBodyLimit = 3500 // runes; leaves headroom under Telegram's 4096
@@ -68,8 +68,11 @@ func summarizeRecorder(svc *summarize.Service) th.Handler {
 }
 
 // handleSummarize is the public in-chat /summarize [N] entry point.
-// Authorization is the project standard (AdminCache: getChatAdministrators
-// + 60s TTL, re-checked every call). It returns fast: the multi-minute
+// Authorization is owner-only: the exact configured bot owner
+// (App.botOwnerID, from the required BOT_OWNER_ID). Everyone else -
+// including admins and anonymous admins - gets no reply at all: the
+// whole privacy/anti-spam posture is "never add public noise". It
+// returns fast: the multi-minute
 // Pi call runs in a tracked background goroutine that edits a
 // placeholder message in place, so the chat carries one artifact, never
 // two, and the handler never holds a telego worker for minutes.
@@ -80,30 +83,28 @@ func (a *App) handleSummarize(_ *th.Context, msg telego.Message) error {
 	if msg.From == nil {
 		return nil
 	}
-	// Anonymous admins post as the group: no user id to match against
-	// getChatAdministrators. Same limitation the DM-only moderation
-	// surface documents; tell them how to proceed instead of silently
-	// dropping (they ARE an admin, just unidentifiable here).
-	if shared.IsAnonymousAdmin(msg.From.ID) {
-		return a.replySummarize(&msg, text.ErrSummarizeAnon)
+	if msg.From.ID != a.botOwnerID {
+		// Non-owner (admins and anonymous admins alike) gets no reply at
+		// all: the whole privacy/anti-spam posture is "never add public
+		// noise" - a refusal line is noise.
+		return nil
 	}
 
-	absChatID := storage.AbsChatID(msg.Chat.ID)
-	isAdmin, err := a.adminCache.IsAdmin(absChatID, msg.From.ID)
-	if err != nil {
-		a.log.Warn("summarize admin check failed", "abs_chat_id", absChatID, "error", err)
-		return a.replySummarize(&msg, text.ErrSummarizeProvider)
-	}
-	if !isAdmin {
-		// Non-admins get no reply at all: the whole privacy/anti-spam
-		// posture is "never add public noise" - a refusal line is noise.
-		return nil
+	// Authorize before touching cooldown state. gateMsg cannot wrap this
+	// route: its bounded cooldown notice would make a repeated non-owner
+	// call visible, violating the owner-only silent-drop contract.
+	if a.cooldown != nil {
+		allowed, _ := a.cooldown.gate(msg.From.ID, "summarize", summarizeCooldown)
+		if !allowed {
+			return nil
+		}
 	}
 
 	if a.summarize == nil || a.summarizeSender == nil {
 		return a.replySummarize(&msg, text.MsgSummarizeNotConfigured)
 	}
 
+	absChatID := storage.AbsChatID(msg.Chat.ID)
 	args := parseSummarizeArgs(msg.Text)
 	requester := summarizeName(msg.From)
 
