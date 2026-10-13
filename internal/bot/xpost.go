@@ -301,9 +301,9 @@ func processXPost(
 }
 
 // xpostTranslateTweet replaces tweet.Text with a Russian translation
-// when the tweet is in neither Russian nor English (the chat reads
-// both) and a translator is wired. Any failure keeps the original
-// text - the repost is never blocked by the translator.
+// when the tweet is not Russian (FixTweet reports the language; "" and
+// "und" are undetermined) and a translator is wired. Any failure keeps
+// the original text - the repost is never blocked by the translator.
 func xpostTranslateTweet(
 	ctx context.Context,
 	log *slog.Logger,
@@ -316,7 +316,7 @@ func xpostTranslateTweet(
 		return
 	}
 	switch tweet.Lang {
-	case "", "und", "ru", "en":
+	case "", "und", "ru":
 		return
 	}
 	input := tweet.Text

@@ -693,9 +693,12 @@ func TestProcessXPostTranslatesForeignTweet(t *testing.T) {
 	}
 }
 
-func TestProcessXPostKeepsRussianAndEnglishText(t *testing.T) {
-	for _, lang := range []string{"ru", "en", "und", ""} {
-		t.Run("lang_"+lang, func(t *testing.T) {
+// TestProcessXPostLanguageGate pins the gate in xpostTranslateTweet:
+// Russian and undetermined (""/"und") text is reposted verbatim, every
+// other report - English included - goes through the translator.
+func TestProcessXPostLanguageGate(t *testing.T) {
+	for _, lang := range []string{"ru", "und", ""} {
+		t.Run("passthrough_"+lang, func(t *testing.T) {
 			payload := fmt.Sprintf(`{"code":200,"tweet":{"url":"https://x.com/alice/status/123456",`+
 				`"text":"hello мир","lang":%q,`+
 				`"author":{"name":"Alice","screen_name":"alice"},"media":{}}}`, lang)
@@ -703,7 +706,7 @@ func TestProcessXPostKeepsRussianAndEnglishText(t *testing.T) {
 			defer api.Close()
 
 			translate := func(context.Context, string) (string, error) {
-				t.Fatal("translator must not run for ru/en/und tweets")
+				t.Fatal("translator must not run for ru/und tweets")
 				return "", nil
 			}
 			snd := &recYTSender{}
@@ -715,6 +718,36 @@ func TestProcessXPostKeepsRussianAndEnglishText(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("translates_en", func(t *testing.T) {
+		payload := `{"code":200,"tweet":{"url":"https://x.com/alice/status/123456",` +
+			`"text":"GLM5.3 took back the crown","lang":"en",` +
+			`"author":{"name":"Alice","screen_name":"alice"},"media":{}}}`
+		api := xpostAPIServer(t, payload)
+		defer api.Close()
+
+		var gotInput string
+		translate := func(_ context.Context, text string) (string, error) {
+			gotInput = text
+			return "GLM5.3 снова забрал корону", nil
+		}
+		snd := &recYTSender{}
+		msg := ytTestMessage("https://x.com/alice/status/123456")
+		processXPost(context.Background(), snd, discardLogger(), api.Client(), api.URL, translate, nil, msg, msg.Text)
+
+		if gotInput != "GLM5.3 took back the crown" {
+			t.Fatalf("translator input = %q", gotInput)
+		}
+		if len(snd.Messages) != 1 {
+			t.Fatalf("messages = %d, want 1", len(snd.Messages))
+		}
+		if !strings.Contains(snd.Messages[0].Text, "GLM5.3 снова забрал корону") {
+			t.Fatalf("caption missing translation: %q", snd.Messages[0].Text)
+		}
+		if strings.Contains(snd.Messages[0].Text, "took back the crown") {
+			t.Fatalf("caption must not carry the untranslated English: %q", snd.Messages[0].Text)
+		}
+	})
 }
 
 func TestProcessXPostTranslationFailureKeepsOriginal(t *testing.T) {

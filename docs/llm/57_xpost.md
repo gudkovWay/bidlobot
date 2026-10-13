@@ -14,10 +14,11 @@ carries an `x.com`/`twitter.com` status URL, the bot resolves the tweet
 through the public FixTweet JSON API (`api.fxtwitter.com`) and re-sends
 it as ONE message - tweet text as caption, every photo/video as native
 Telegram media, canonical link to the original - then deletes the
-user's message. Tweets detected as neither Russian nor English (FixTweet
-`lang`) are translated to Russian first via the shared Pi runner
-(DeepSeek V4 Flash, 60s timeout, 4000-unit input cap); a failed or empty
-translation keeps the original text and never blocks the repost.
+user's message. Russian, undetermined (`und`), and empty-language tweets pass
+through unchanged. English and every other detected language are translated to
+Russian first via the shared Pi runner (DeepSeek V4 Flash, 60s timeout,
+4000-unit input cap); a failed or empty translation keeps the original text and
+never blocks the repost.
 Contract mirrors the TikTok reposter: repost first, delete only after a
 successful send; on failure the original stays and a decline note is
 posted.
