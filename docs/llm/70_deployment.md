@@ -8,22 +8,68 @@ touches:
   - deploy/env.example
   - scripts/backup.sh
   - .github/workflows/ci.yml
-  - .omp/skills/bidlobot-deploy/scripts/deploy.sh
-  - .omp/skills/bidlobot-deploy/scripts/status.sh
+  - .github/workflows/publish.yml
+  - .omp/skills/bidlobot-deploy/SKILL.md
   - cmd/bidlobot/
 written: 2026-05-14
-updated: 2026-09-25
+updated: 2026-10-27
 ---
 
 # Deployment
 
-Production runs as a docker-compose stack with a **single service**:
-`bot` (the Go binary). Single bot replica (Telegram allows exactly one
+Production runs on the homelab k8s cluster, deployed from this repo's
+`gitops` branch via Flux (see [Kubernetes deploy
+(production)](#kubernetes-deploy-production)). The docker-compose stack
+below is the local / standalone-host flow: a **single service** `bot`
+(the Go binary). Single bot replica (Telegram allows exactly one
 getUpdates poller per token). Named volume for bbolt, internal
 healthcheck (no host ports published), non-root container with tini as
 PID 1. Revised 2026-08-16 (xpost rework: the `xshot` Puppeteer sidecar
 was retired; the bot resolves X posts via the FixTweet API and
 downloads twimg media directly).
+
+## Kubernetes deploy (production)
+
+Since 2026-10-11 the bot runs in the `bidlobot` namespace of the
+homelab k3s cluster (context `arsolitt@homelab`). Since 2026-10-17 the
+payload is reconciled by Flux from the orphan `gitops` branch of this
+repository, which holds only `deploy/`:
+
+- `deployment.yaml` - single replica, `Recreate` strategy (one
+  `getUpdates` poller per token + exclusive bbolt flock), `envFrom`
+  `bidlobot-secrets`, kubelet probes on the static `/livez` (never
+  `/health` - see [Health and version](#health-and-version)).
+- `pvc.yaml` - `bidlobot-data`, StorageClass `local-retain`, 2Gi.
+- `externalsecret.yaml` - pure reference, no values: ExternalSecret
+  `bidlobot-secrets` pulls `TG_BOT_TOKEN` / `BOT_OWNER_ID` /
+  `DEEPSEEK_API_KEY` from the Bitwarden Secrets Manager (project
+  `homelab`) via the `bitwarden` ClusterSecretStore on the cluster and
+  materializes the Secret the Deployment `envFrom`s; `deletionPolicy:
+  Retain`.
+- `kustomization.yaml` - the Deployment image is the placeholder
+  `ghcr.io/bydlokod/bidlobot:master`; the `images:` transformer
+  rewrites it, and CI rewrites its `newTag` + `digest` lines - the
+  digest pins what runs.
+
+Deploy path: push to `master` -> `publish.yml` runs a linear chain:
+`test` (vet + `go test`) gates `image` (linux/amd64, GHCR; emits the
+pushed `TAG` + `DIGEST`), then `smoke` (pull by digest and boot the
+image with a fake token: `--check-config` exit 0, then the documented
+fail-fast Telegram auth gate - GetMe precedes the health listener, so
+`/livez` cannot serve under a fake token; kubelet proves liveness
+in-cluster) and `sign` (cosign keyless OIDC over the digest) both gate
+`update-manifest`, which rewrites `newTag` + `digest` on the `gitops`
+branch (GITHUB_TOKEN pushes never trigger workflows, so no CI loop)
+-> Flux reconciles the digest-pinned image (GitRepository `bidlobot`,
+`ref: {branch: gitops}`, interval 5m - public repo, no PAT, GitHub
+unauthenticated budget 60 req/h per IP; owner Kustomization `path:
+deploy`, interval 1m, `prune: false`, `wait: true` - both live in the
+homelab gitops repo, `clusters/homelab/{sources,apps}/bidlobot.yaml`)
+-> Recreate rolls the single poller. Because the manifest pins the
+digest, overwriting a tag in GHCR cannot reach the cluster, and a red
+test can no longer ship an image. Bootstrap (bbolt seed restore) and
+backup (scale-to-0 helper-pod recipe) runbooks live in
+`deploy/README.md` on the `gitops` branch.
 
 ## Prerequisites
 
@@ -108,7 +154,7 @@ Optional:
 
 - `LOG_LEVEL` -- debug|info|warn|error, default `info`.
 - `DB_PATH` -- bbolt directory. Container default `/var/lib/bidlobot`.
-- `HEALTH_PORT` -- /health + /version port, default `8080`; `0`
+- `HEALTH_PORT` -- /health + /livez + /version port, default `8080`; `0`
   disables the listener (breaks the compose healthcheck unless
   rewritten).
 - `PI_BINARY` / `PI_MODEL` -- the summarize provider CLI + model.
@@ -126,6 +172,11 @@ Optional:
   `pass` into the same shell first.
 - `CAPTCHA_ENABLED` (default false) / `CAPTCHA_TIMEOUT` (default `1m`,
   1m..30m) -- new-member math captcha + welcome animation.
+- `BIRTHDAY_ENABLED` (default false) -- daily profile-birth-date
+  greeting at 10:00 Europe/Moscow. The job reads
+  `ChatFullInfo.birthdate` through `getChat` and stores no birth date.
+  Enabling it makes the bot post one public greeting per chat on a
+  member's birthday ([66_birthdays.md](66_birthdays.md)).
 - `INSTAGRAM_PROXY` / `INSTAGRAM_COOKIES` -- egress for the Instagram
   repost download ([61_instagram_repost.md](61_instagram_repost.md)).
   Instagram is blocked outright on some ISPs (Russia blocks it at the
@@ -184,11 +235,10 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
-Deploy helper: `.omp/skills/bidlobot-deploy/scripts/deploy.sh`
-(git push -> SSH with `DEEPSEEK_API_KEY` from `pass show
-token/deepseek` -> `docker compose up -d --build` -> health wait) and
-`status.sh` (env + container status). NOTE: `status.sh` still greps
-`GLM_` in the host env - stale, cosmetic only.
+Deploy helper: the VM-era scripts (`deploy.sh`, `status.sh`) were
+removed together with the VM deploy they served;
+`.omp/skills/bidlobot-deploy/SKILL.md` now documents the gitops-branch
+flow and the kubectl/flux status and rollback commands.
 
 Verifiable upgrade facts:
 
@@ -203,13 +253,23 @@ Verifiable upgrade facts:
 
 ```sh
 docker exec bidlobot wget -qO- http://127.0.0.1:8080/health
+docker exec bidlobot wget -qO- http://127.0.0.1:8080/livez
 docker exec bidlobot bidlobot --version
 ```
 
 `/health` returns `200 {"status":"ok"}` when: bbolt accepts a no-op
-view tx; the most recent update arrived within 5 min (or startup
-grace); a cached `getMe` (TTL 60s) succeeded. `/version` returns build
-info (commit hash via `-X main.version=... -X main.commit=...`).
+view tx; the last successful `getUpdates` poll cycle completed within
+5 min (or startup grace) - cycles with zero updates count, so a quiet
+chat stays green and only a wedged poll loop or an unreachable
+Telegram flips it to 503; a cached `getMe` (TTL 60s) succeeded.
+`/version` returns build info (commit hash via `-X main.version=...
+-X main.commit=...`).
+
+`/livez` is a static `200 {"status":"ok"}` with no checks by design:
+it only answers "the process is serving HTTP". Container platforms
+whose liveness probes restart the container on failure (kubelet) MUST
+point those probes at `/livez`; dependency-aware checks belong on
+`/health` - which is also what the compose `HEALTHCHECK` keeps using.
 
 ## Backup
 

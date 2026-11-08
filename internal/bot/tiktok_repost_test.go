@@ -111,6 +111,28 @@ func TestTikTokDecision(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "attached video with credit link in caption",
+			msg: &telego.Message{
+				MessageID: 1,
+				Chat:      telego.Chat{ID: -100123, Type: telego.ChatTypeSupergroup},
+				From:      &telego.User{ID: 200},
+				Video:     &telego.Video{},
+				Caption:   "https://www.tiktok.com/@user/video/123",
+			},
+			want: false,
+		},
+		{
+			name: "attached photo keeps link eligible",
+			msg: &telego.Message{
+				MessageID: 1,
+				Chat:      telego.Chat{ID: -100123, Type: telego.ChatTypeSupergroup},
+				From:      &telego.User{ID: 200},
+				Photo:     []telego.PhotoSize{{Width: 1, Height: 1}},
+				Caption:   "https://www.tiktok.com/@user/video/123",
+			},
+			want: true,
+		},
+		{
 			name: "url entity with TikTok host",
 			msg: &telego.Message{
 				MessageID: 1,
@@ -667,5 +689,25 @@ func TestRepostCaption(t *testing.T) {
 	got = repostCaption("bob", "Bob", "")
 	if strings.Contains(got, "\n") {
 		t.Errorf("empty caption should not add newline; got %q", got)
+	}
+}
+
+func TestProcessTikTokVideoPreservesTextComment(t *testing.T) {
+	origFFprobe := ffprobeHasAudio
+	ffprobeHasAudio = func(string) bool { return true }
+	t.Cleanup(func() { ffprobeHasAudio = origFFprobe })
+	path := filepath.Join(t.TempDir(), "video.mp4")
+	if err := os.WriteFile(path, []byte("fake mp4"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snd := &recYTSender{}
+	msg := ttTestMessage("мой <комментарий> https://vt.tiktok.com/ZSgFJQKwT/")
+	processTikTok(context.Background(), snd, slog.New(slog.DiscardHandler), nil, nil, nil,
+		msg, "https://vt.tiktok.com/ZSgFJQKwT/", path)
+	if len(snd.Videos) != 1 || len(snd.Deletes) != 1 {
+		t.Fatalf("videos=%d deletes=%d", len(snd.Videos), len(snd.Deletes))
+	}
+	if !strings.Contains(snd.Videos[0].Caption, "мой &lt;комментарий&gt; https://vt.tiktok.com/ZSgFJQKwT/") {
+		t.Fatalf("video repost deleted the user's text: %q", snd.Videos[0].Caption)
 	}
 }

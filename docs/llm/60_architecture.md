@@ -11,7 +11,7 @@ touches:
   - internal/testutil/
   - internal/text/
 written: 2026-05-14
-updated: 2026-09-25
+updated: 2026-10-27
 ---
 
 # Architecture
@@ -38,7 +38,7 @@ internal/
     captcha.go         new-member captcha wiring (opt-in)
     deferred.go        /flush per-user retry queue
     summarize.go       /summarize + /итог handler
-    youtube_sanitizer.go  YT si= strip (delete+repost)
+    youtube_sanitizer.go  YT si= strip (copy-then-delete, entity-preserving)
     repost_common.go      shared repost pipeline: sender gate, yt-dlp ladder, upload-then-delete tail, deferred queue
     tiktok_repost.go      TikTok video repost (mirror -> yt-dlp)
     tiktok_source.go      tikwm mirror: resolve + stream the MP4
@@ -53,6 +53,7 @@ internal/
     failure_catalog.go    randomized Russian decline phrases
   domain/
     membership/  Member + Chat upserts; activity truth source
+    birthday/    daily profile birth-date greeting; 48h marker lifecycle
     stats/       lifetime counters + daily + Russian display
     monthstats/  per-calendar-month nominations engine
     moderation/  warning store (legacy, no surface feeds it)
@@ -68,7 +69,9 @@ internal/
   shared/safe.go   Go(): panic-safe background goroutine launcher
   shared/ratelimit per-chat outgoing token bucket
   shared/retry     429 + 5xx + transport retry policy, per-attempt deadline
-  shared/tgclient  composed wrapper: migration -> retry -> rate-limit
+  shared/tgclient  composed wrapper: migration -> retry -> rate-limit;
+                   standard sends plus server-side copy and the
+                   rich-message slideshow sender (photos + audio)
   storage/         bbolt repos + key conventions + migration
   testutil/        MockAPI + recorder + update factories
   text/            user-facing Russian strings (single source)
@@ -129,15 +132,18 @@ slash commands and callbacks coexist.
 
 App-level middleware in `Run`: `recoverMiddleware` (outermost - a panic
 in any route below becomes a log record instead of a dead process),
-then `healthMiddleware` (update freshness), then `inFlightMiddleware`
-(per-update WaitGroup).
+then `inFlightMiddleware` (per-update WaitGroup). The /health freshness
+window is keyed on the long-poll loop instead (`App.pollUpdates`
+heartbeats on every completed `getUpdates` cycle, empty ones included);
+the update path no longer feeds health state.
 
 Side-effect axes:
 - Every chat-visible send flows through `tgclient.Client` (per-chat
   rate limit -> retry -> migration): stats, games, reputation,
   referrals, summarize placeholder/edit, sanitizer/reposter sends,
-  captcha mute/kick/welcome, onboarding. This keeps high-volume public
-  paths inside Telegram's 20 msg/min/chat budget under load.
+  captcha mute/kick/welcome, birthday greetings, onboarding. This
+  keeps high-volume public paths inside Telegram's 20 msg/min/chat
+  budget under load.
 - Heavy media work (TikTok download/upload, xpost render/videos,
   captcha welcome animation) runs **fire-and-forget** through
   `shared.Go(log, name, fn)`, which spawns the goroutine behind a
@@ -152,7 +158,7 @@ Side-effect axes:
   (nothing creates them anymore - dead surface, kept for the game
   callbacks that share the catch-all).
 
-## bbolt schema (`storage/bolt.go`, 28 buckets)
+## bbolt schema (`storage/bolt.go`, 29 buckets)
 
 | Bucket | Key | Value |
 |--------|-----|-------|
@@ -179,10 +185,13 @@ Side-effect axes:
 | `referrals` | `rf:<absChatID>:<refID>` | referral |
 | `admission_attempts` | `aa:<userID>` | 8-byte BE counter |
 | `deferred_jobs` | `dj:<zero-padded UnixNano>` | JSON `DeferredJob` (FIFO) |
+| `birthday_greeted` | `bg:<absChatID>:<YYYY-MM-DD>:<userID>` | 8-byte BE UTC timestamp; 48h TTL |
+| `tiktok_videos` | `tv:<absChatID>:<videoID>` | message id of the bot TikTok repost |
 
 `dm_sessions` was removed with the DM console (caa8f55). Buckets
 created idempotently in `storage.NewBoltStore`. `MigrateChatID`
-rekeys stats/members/chats/warnings/monthstats/dailystats/referrals;
+rekeys stats/members/chats/warnings/monthstats/dailystats/birthday
+greet markers/referrals;
 **known gap**: reputation, captcha, deferred_jobs, admission_attempts,
 gracekick and game leaderboards are NOT rekeyed on group->supergroup
 migration (documented, not silently handled).
@@ -203,14 +212,17 @@ migration (documented, not silently handled).
    repost leaves the original intact.
 5. **No third-party pings.** No user-triggered command emits
    `@handle` / `tg://user?id=` / `text_mention` for a third party;
-   attribution headers render inert display names.
+   attribution headers render inert display names. The birthday
+   greeting is a scheduled exception that mentions the birthday member
+   only, never a bystander.
 6. **Owner-gated installation.** Non-owner bot adds trigger immediate
    LeaveChat + owner DM notice (bounded to 2 per actor).
 7. **Cooldown is self-evicting.** Per-(user,command) gate sweeps
    entries older than 10m every 5m - bounded memory.
 8. **Workers respect app context.** Gracekick tick, deferred GC,
-   pending GC, captcha sweep, summarize take App's signal context;
-   `App.Stop()` waits `inFlight` up to `ShutdownTimeout` (10s).
+   pending GC, captcha sweep, birthday check, and summarize take App's
+   signal context; `App.Stop()` waits `inFlight` up to
+   `ShutdownTimeout` (10s).
 9. **Heavy sends never block the loop.** Fire-and-forget
    `context.Background()` goroutines for media uploads/downloads, always
    launched through `shared.Go` so a panic in one is contained.
@@ -235,7 +247,8 @@ No `edited_message`, no `chat_join_request`.
 | deferred GC | 10 min | 48h TTL jobs |
 | daily gracekick tick | `CLEANUP_DAILY_AT` UTC | idle (no seeding command) |
 | captcha sweep | min(timeout/3, 30s), >=5s | kicks unanswered challenges |
-| health server | - | /health + /version |
+| birthday check | daily 10:00 MSK | `BIRTHDAY_ENABLED`; startup catch-up 10:00-20:00; tracked in `inFlight` |
+| health server | - | /health + /livez + /version |
 
 ## Failure handling
 
@@ -250,7 +263,9 @@ No `edited_message`, no `chat_join_request`.
 | panic in any route | `App.recoverMiddleware` | log with stack; the process and the update loop survive |
 | bbolt I/O | service | propagate; reply "временная ошибка" |
 | TikTok download/audio fail | `tiktok_repost.go` | mirror first, yt-dlp fallback; both failed -> enqueue to deferred queue; original kept |
-| TikTok photo post | `tiktok_source.go` | decline note; never queued (no retry can succeed) |
+| TikTok photo post | `tiktok_photos.go` | one rich-message slideshow: photos + original audio, then delete; transient download/send failures -> deferred queue |
+| TikTok slideshow over the attachment/size caps | `tiktok_photos.go` | permanent: `images+audio > 50` or a slide >10 MiB -> decline note, never queued (`errTikTokImageTooLarge`, symmetric with `errTikTokAudioTooLarge`) |
+| TikTok slideshow download budget | `tiktok_photos.go` | `slideshowDownloadBudget(attachments)` = 30s + 30s per attachment, so 50 sequential fetches are not cut off by a fixed 120s |
 | TikTok 4xx send rejection (too large, forbidden) | `tiktok_repost.go` | public decline note; original kept; never queued (the answer is permanent) |
 | TikTok transient send failure (transport, 429, 5xx) | `tiktok_repost.go` | enqueue to the deferred queue; `/flush` replays it |
 | Instagram download fail (transport, 429, 5xx) | `instagram_repost.go` | yt-dlp retried 3x; still failing -> enqueue to deferred queue; original kept |
@@ -259,13 +274,18 @@ No `edited_message`, no `chat_join_request`.
 | Instagram 4xx send rejection (too large, forbidden) | `instagram_repost.go` | public decline note; original kept; never queued |
 | Instagram transient send failure (transport, 429, 5xx) | `instagram_repost.go` | enqueue to the deferred queue; `/flush` replays it |
 | xpost any failure | `xpost.go` | decline note; original kept (never deleted) |
-| YT sanitizer repost fail | `youtube_sanitizer.go` | original left intact |
+| YT sanitizer copy fail (any part) | `youtube_sanitizer.go` | original left intact; partial long-caption posts rolled back |
 | summarize provider fail | `summarize.go` | enqueue to deferred queue; placeholder stays |
 | summarize timeout/budget | `summarize.go` | Russian error, lower N |
 | Game/stats flood | `cooldown.gateMsg` | silent drop (bounded notice) |
 | Per-chat rate burst | ratelimit queue | drop oldest + WARN |
 | Non-owner bot add | `membership.go` | LeaveChat + owner DM notice |
-| Health DB/updates/GetMe | `/health` 503 | reason in body |
+| birthday `getChat` error or hidden date | `birthday/service.go` | skip the member; no message |
+| birthday `getChatMember` error | `birthday/service.go` | skip the member; no message |
+| birthday send failure | `birthday/service.go` | `tgclient` retries; markers cleared; no same-day retry |
+| birthday marker write failure | `birthday/service.go` | no send; already-written markers cleared |
+| birthday chat bot status `left`/`kicked` | `birthday/service.go` | skip the chat |
+| Health DB/poll heartbeat/GetMe | `/health` 503 | reason in body; `/livez` stays 200 |
 | SIGINT/SIGTERM | `signal.NotifyContext` | cancel -> `App.Stop()` -> flush -> `db.Close()` |
 
 ## Deferred queue
@@ -275,16 +295,23 @@ retry queue for failed **TikTok and Instagram exports** and
 **summarize** calls (commits 81f45c9, 47cdd99; Instagram added
 2026-09-25). Public `/flush` (30s cooldown) processes
 the caller's own jobs sequentially in a background goroutine: tiktok
--> `tryTikTokExport` (full download->validate->upload->delete cycle;
-error keeps the job), instagram -> `tryInstagramExport` (same cycle
-through the shared tail; a post that carries no video, or an upload
-Telegram refuses with a 4xx, is reported once and dropped - both
-reposters drop such a job instead of re-downloading it on every
-`/flush`), summarize -> `retrySummarize` (re-runs
+-> `tryTikTokExport` (full download->validate->upload->delete cycle for
+videos and photo slideshows; a transient error keeps the job, while a
+permanent outcome - over-limit slideshow, over-cap slide/soundtrack,
+4xx upload - is reported once and dropped), instagram ->
+`tryInstagramExport` (same cycle through the shared tail; a post that
+carries no video, or an upload Telegram refuses with a 4xx, is
+reported once and dropped - both reposters drop such a job instead of
+re-downloading it on every `/flush`), summarize -> `retrySummarize`
+(re-runs
 `Summarize`, edits the placeholder with 25s timeout). Success ->
 `Delete(key)`. Storage: `deferred_jobs`, key `dj:<zero-padded
 UnixNano>` (lexicographic FIFO), JSON `DeferredJob{user_id, type,
-chat_id, message_id, payload, created_at}`, TTL 48h, GC every 10 min.
+chat_id, message_id, message_thread_id, payload, created_at}`, TTL
+48h, GC every 10 min. `message_thread_id` is optional
+(`json:"message_thread_id,omitempty"`): a retried TikTok/photo repost
+returns to its original topic, while older rows without the field stay
+readable and land in the general topic.
 Always wired; nil queue (tests) -> failures fall back to decline
 replies.
 
@@ -296,5 +323,6 @@ replies.
 | New passive content middleware | `routes.go` sgGroup.Use chain, after the observers; repost-then-delete or add-only discipline |
 | New persistent entity | `storage/<e>_repo.go` + bucket in `bolt.go` + domain service |
 | New background sweep | `app.go` Run() goroutine; share `App.inFlight` if it must block shutdown |
+| New daily job | `internal/domain/<name>/` service + `App.Attach<Name>` + a tracked goroutine in `app.go` Run |
 | New /health probe | `health.go` healthChecker |
 | New callback family | `routes.go` BEFORE the `v1:` catch-all; narrow predicate first |

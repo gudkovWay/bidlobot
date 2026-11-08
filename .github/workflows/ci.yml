@@ -8,9 +8,9 @@
 #   3. secret hygiene -- gitleaks scan, since the repo is public and
 #      one accidental .env commit becomes a permanent leak
 #
-# Actions are pinned to floating major tags (v4 / v5). When the
-# project starts shipping signed releases or accepts external PRs,
-# pin to commit SHAs instead.
+# Actions are pinned to commit SHAs (the repo is public and its
+# workflow output deploys to prod); the trailing comment on each
+# `uses:` line is the major tag the SHA was resolved from.
 name: ci
 
 on:
@@ -33,12 +33,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0 # gitleaks needs full history
 
       - name: setup go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26'
           cache: true
@@ -54,7 +54,7 @@ jobs:
 
       - name: upload coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-${{ github.run_id }}
           path: coverage.out
@@ -70,10 +70,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: setup buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: build (no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: false
@@ -88,8 +88,8 @@ jobs:
       - name: smoke test image
         run: |
           docker run --rm bidlobot:ci --version
-          docker run --rm -e TG_BOT_TOKEN= bidlobot:ci --check-config && exit 1 || true
-          docker run --rm -e TG_BOT_TOKEN=123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi bidlobot:ci --check-config
+          docker run --rm -e TG_BOT_TOKEN= -e BOT_OWNER_ID=1 bidlobot:ci --check-config && exit 1 || true
+          docker run --rm -e TG_BOT_TOKEN=123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi -e BOT_OWNER_ID=1 bidlobot:ci --check-config
 
   secret-scan:
     name: gitleaks
@@ -97,11 +97,19 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
+      # The gitleaks-action wrapper requires a paid license on organization
+      # repositories; the CLI itself is MIT, so run the pinned binary directly.
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl -fsSL -o /tmp/gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+          /tmp/gitleaks detect --verbose --redact

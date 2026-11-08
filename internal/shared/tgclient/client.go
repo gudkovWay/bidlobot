@@ -65,6 +65,7 @@ const (
 // Client is the fully wrapped Telegram bot client. Construct with [New].
 type Client struct {
 	bot         *telego.Bot
+	richCaller  telegoapi.Caller
 	limiter     *ratelimit.Limiter
 	retryPolicy retry.Policy
 	mediaPolicy retry.Policy
@@ -77,7 +78,10 @@ type Client struct {
 // defaults to slog.Default) - a wrapper that silently skipped a layer
 // would defeat the point of the wrapper.
 type Config struct {
-	Bot         *telego.Bot
+	Bot *telego.Bot
+	// RichCaller supplies the transport for Bot API methods absent from telego.
+	// nil uses the context-bounded standard HTTP caller.
+	RichCaller  telegoapi.Caller
 	Limiter     *ratelimit.Limiter
 	RetryPolicy retry.Policy
 	Migrator    Migrator
@@ -112,6 +116,7 @@ func New(cfg Config) (*Client, error) {
 	media.MaxTransportAttempts = mediaMaxTransportAttempts
 	return &Client{
 		bot:         cfg.Bot,
+		richCaller:  cfg.RichCaller,
 		limiter:     cfg.Limiter,
 		retryPolicy: policy,
 		mediaPolicy: media,
@@ -439,6 +444,64 @@ func (c *Client) SendMediaGroup(ctx context.Context, params *telego.SendMediaGro
 		func(newSigned int64) { params.ChatID = telego.ChatID{ID: newSigned} },
 	)
 	return msgs, err
+}
+
+// CopyMessage wraps telego.Bot.CopyMessage. A copy is a server-side
+// operation (no upload), but it is chat-visible traffic so it shares
+// the per-chat rate budget like every other public send. On migration
+// both the target ChatID and - when copying within the same chat - the
+// matching source FromChatID are rewritten to the new chat id.
+func (c *Client) CopyMessage(ctx context.Context, params *telego.CopyMessageParams) (*telego.MessageID, error) {
+	if params == nil {
+		return nil, errors.New("tgclient: nil params")
+	}
+	oldTarget := params.ChatID.ID
+	oldFrom := params.FromChatID.ID
+	var id *telego.MessageID
+	err := c.runWrite(ctx, params.ChatID.ID, "copyMessage",
+		func(ctx context.Context) error {
+			mid, e := c.bot.CopyMessage(ctx, params)
+			if e != nil {
+				return e
+			}
+			id = mid
+			return nil
+		},
+		func(newSigned int64) {
+			params.ChatID = telego.ChatID{ID: newSigned}
+			if oldFrom == oldTarget {
+				params.FromChatID = telego.ChatID{ID: newSigned}
+			}
+		},
+	)
+	return id, err
+}
+
+// CopyMessages shares the write budget and migration handling of
+// CopyMessage. It also supports explicitly removing media captions.
+func (c *Client) CopyMessages(ctx context.Context, params *telego.CopyMessagesParams) ([]telego.MessageID, error) {
+	if params == nil {
+		return nil, errors.New("tgclient: nil params")
+	}
+	sameChat := params.FromChatID.ID == params.ChatID.ID
+	var ids []telego.MessageID
+	err := c.runWrite(ctx, params.ChatID.ID, "copyMessages",
+		func(ctx context.Context) error {
+			copied, err := c.bot.CopyMessages(ctx, params)
+			if err != nil {
+				return err
+			}
+			ids = copied
+			return nil
+		},
+		func(newSigned int64) {
+			params.ChatID = telego.ChatID{ID: newSigned}
+			if sameChat {
+				params.FromChatID = telego.ChatID{ID: newSigned}
+			}
+		},
+	)
+	return ids, err
 }
 
 // EditMessageText wraps telego.Bot.EditMessageText.

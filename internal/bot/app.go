@@ -11,6 +11,7 @@ import (
 	"github.com/mymmrac/telego"
 	th "github.com/mymmrac/telego/telegohandler"
 
+	"github.com/veschin/bidlobot/internal/domain/birthday"
 	"github.com/veschin/bidlobot/internal/domain/captcha"
 	"github.com/veschin/bidlobot/internal/domain/gracekick"
 	"github.com/veschin/bidlobot/internal/domain/membership"
@@ -25,6 +26,15 @@ import (
 // replayed on next start via long-polling offset, so a hard cap is
 // preferable to a hung process.
 const ShutdownTimeout = 10 * time.Second
+
+// Poll-loop settings for the bot-local getUpdates loop (pollUpdates).
+// They mirror the defaults of the telego long-poll loop this replaced:
+// an 8s pause before retrying a failed fetch and a 100-update channel
+// buffer.
+const (
+	longPollingRetryTimeout     = 8 * time.Second
+	longPollingUpdateChanBuffer = 100
+)
 
 type App struct {
 	bot         *telego.Bot
@@ -79,6 +89,9 @@ type App struct {
 	// captchaSvc is the opt-in new-member captcha. nil (default) means
 	// the feature is off: no join messages, no buttons, no sweep.
 	captchaSvc *captcha.Service
+	// birthdays is the opt-in daily profile-birth-date greeting job.
+	// nil (default) means the feature is off.
+	birthdays *birthday.Service
 	// referrals is the opt-in referral catalog UX. nil (default) means
 	// /refs, /refreg, and /refreport are not wired.
 	referrals *ReferralHandler
@@ -176,11 +189,11 @@ func (a *App) AttachRepReactions(r *repReactor) {
 	a.repReactor = r
 }
 
-// AttachHealth wires the /health and /version listener and the in-memory
-// healthChecker the bot updates as it processes incoming events. dbOpen
-// must report whether the bbolt instance is live; getMeOK should call
-// the bot's GetMe (typically through the rate-limited wrapper). Either
-// callback may be nil to skip that check.
+// AttachHealth wires the /health, /livez and /version listener and the
+// in-memory healthChecker the bot heartbeats as its poll loop completes
+// cycles. dbOpen must report whether the bbolt instance is live; getMeOK
+// should call the bot's GetMe (typically through the rate-limited
+// wrapper). Either callback may be nil to skip that check.
 //
 // version and commit override the runtime/debug.ReadBuildInfo defaults.
 // Pass empty strings to use whatever the binary was built with.
@@ -244,7 +257,10 @@ func (a *App) Run(ctx context.Context, statsH *stats.Handler) error {
 		return errors.New("bot: nil sender; construct App via NewApp with the tgclient wrapper")
 	}
 
-	updates, err := a.bot.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
+	// Bot-local poll loop instead of telego's UpdatesViaLongPolling: the
+	// loop must heartbeat /health after every successful getUpdates call
+	// (empty or not), and telego's internal loop offers no hook for that.
+	updates := a.pollUpdates(ctx, a.bot.GetUpdates, telego.GetUpdatesParams{
 		// Explicit: telego requires Timeout whenever non-nil params are
 		// passed, and the poll must stay under the HTTP read timeout.
 		Timeout: 30,
@@ -256,10 +272,7 @@ func (a *App) Run(ctx context.Context, statsH *stats.Handler) error {
 			"message_reaction",
 			"inline_query",
 		},
-	})
-	if err != nil {
-		return err
-	}
+	}, longPollingRetryTimeout)
 
 	if err := setCommands(ctx, a.bot, a.botOwnerID); err != nil {
 		a.log.Warn("set commands failed", "error", err)
@@ -274,9 +287,6 @@ func (a *App) Run(ctx context.Context, statsH *stats.Handler) error {
 	// every update on its own goroutine, and a panic anywhere below would
 	// otherwise kill the process.
 	bh.Use(a.recoverMiddleware())
-	if a.healthCheck != nil {
-		bh.Use(a.healthMiddleware())
-	}
 	bh.Use(a.inFlightMiddleware())
 
 	registerRoutes(bh, a, statsH)
@@ -313,6 +323,16 @@ func (a *App) Run(ctx context.Context, statsH *stats.Handler) error {
 		go func() {
 			defer a.inFlight.Done()
 			a.runCaptchaSweep(ctx, interval)
+		}()
+	}
+	if a.birthdays != nil {
+		// Tracked in inFlight: the job sends messages and writes the
+		// greeting markers, so Stop must wait for it before the DB
+		// closes.
+		a.inFlight.Add(1)
+		go func() {
+			defer a.inFlight.Done()
+			a.birthdays.Run(ctx)
 		}()
 	}
 
@@ -359,6 +379,15 @@ func (a *App) AttachDailyCleanup(svc *gracekick.Service, atMinUTC int) {
 // svc leaves the feature off.
 func (a *App) AttachCaptcha(svc *captcha.Service) {
 	a.captchaSvc = svc
+}
+
+// AttachBirthdays enables the daily profile-birth-date greeting job.
+// Call before Run; a nil service leaves the feature off.
+func (a *App) AttachBirthdays(svc *birthday.Service) {
+	if svc == nil {
+		return
+	}
+	a.birthdays = svc
 }
 
 // AttachReferrals wires the chat-scoped referral catalog UX. Call
@@ -527,12 +556,89 @@ func (a *App) inFlightMiddleware() th.Handler {
 	}
 }
 
-// healthMiddleware records the receipt of every update so /health can
-// report freshness. Runs before any user-facing logic and never errors.
-func (a *App) healthMiddleware() th.Handler {
-	return func(ctx *th.Context, update telego.Update) error {
-		a.healthCheck.MarkUpdate(time.Now())
-		return ctx.Next(update)
+// getUpdatesFunc matches the *telego.Bot.GetUpdates method so the poll
+// loop can be unit-tested with a scripted fetch instead of a live bot.
+type getUpdatesFunc func(ctx context.Context, params *telego.GetUpdatesParams) ([]telego.Update, error)
+
+// pollUpdates runs the bot-local getUpdates long-poll loop and returns
+// the update channel (buffer 100, telego's old default). It replaces
+// telego's UpdatesViaLongPolling because that loop is not observable:
+// /health must heartbeat after every successful poll cycle - empty long
+// polls included - and telego offers no hook for that. Semantics mirror
+// telego v1.8.0 doLongPolling:
+//
+//   - fetch is called with the same params each cycle; only updates with
+//     UpdateID >= params.Offset are forwarded, and the offset advances
+//     past every forwarded update so the next call acknowledges it
+//     (Telegram redelivers anything unacknowledged).
+//   - forwarded updates carry update.WithContext(ctx).
+//   - a fetch error logs, waits retryTimeout, and retries; a cancelled
+//     fetch (context.Canceled) or a cancelled ctx ends the loop.
+//
+// The channel is closed when the loop exits. Every successful fetch
+// records the /health heartbeat (a no-op without the health listener).
+func (a *App) pollUpdates(ctx context.Context, fetch getUpdatesFunc, params telego.GetUpdatesParams, retryTimeout time.Duration) <-chan telego.Update {
+	updates := make(chan telego.Update, longPollingUpdateChanBuffer)
+	go func() {
+		defer close(updates)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			batch, err := fetch(ctx, &params)
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				a.log.Error("getUpdates failed", "error", err, "retry_in", retryTimeout)
+				if !waitContext(ctx, retryTimeout) {
+					return
+				}
+				continue
+			}
+
+			// A completed cycle - even one that carried no updates -
+			// proves the loop and Telegram are alive; that is the
+			// heartbeat /health's freshness window is keyed on.
+			a.markPollHeartbeat(time.Now())
+
+			for _, update := range batch {
+				if update.UpdateID < params.Offset {
+					continue
+				}
+				params.Offset = update.UpdateID + 1
+				select {
+				case <-ctx.Done():
+					return
+				case updates <- update.WithContext(ctx):
+				}
+			}
+		}
+	}()
+	return updates
+}
+
+// waitContext waits for d or until ctx is done; it reports whether the
+// full wait elapsed (false: the caller should stop).
+func waitContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// markPollHeartbeat records a completed poll cycle for /health. No-op
+// when the health listener is disabled (HEALTH_PORT=0) or not attached.
+func (a *App) markPollHeartbeat(t time.Time) {
+	if a.healthCheck != nil {
+		a.healthCheck.MarkPoll(t)
 	}
 }
 

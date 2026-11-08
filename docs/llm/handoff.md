@@ -1,111 +1,81 @@
-# Handoff - 2026-09-25 (Instagram repost audited, shipped, yt-dlp pin raised)
+# Handoff - 2026-10-27 (birthday greetings)
 
 ## 1. State (what is true right now)
 
-- **Committed and pushed.** `master` = `436f17e`, two commits:
-  `7fadbe1` (Instagram feature + audit fixes), `436f17e` (yt-dlp pin).
-- **Deployed and running.** `deploy.sh --skip-push` rebuilt the image on
-  `veschin@192.168.0.101` at HEAD `436f17e`; the container came up healthy
-  after 8s, `status.sh` reports `healthy`, health endpoint `ok`, no errors
-  in the last 5 minutes, and the logs read `starting` -> `captcha enabled`
-  -> `bot started, polling for updates`. Container checks: `yt-dlp
-  --version` = 2026.07.04, `DEEPSEEK_API_KEY` present (35 characters), the
-  new code is inside the running binary (`instagram-defer` and
-  `no video stream in this post` both present), and the container
-  downloaded the same 2396150-byte reel anonymously - this deployment needs
-  no `INSTAGRAM_PROXY` and no cookie jar.
-- **What changed.**
-  - `internal/bot/repost_common.go` (new): sender gate, yt-dlp retry
-    ladder, upload-then-delete tail, queue helper, caption builder, host
-    normaliser, 50 MiB cap, `isAPIPermanent`, `errNoVideo`.
-  - `internal/bot/instagram_repost.go` (new): detection, `-f b[ext=mp4]/b`,
-    `--proxy`/`--cookies`, permanent-failure table, one download slot,
-    `dispatchInstagram`, live and `/flush` entry points.
-  - `tiktok_repost.go` reduced to TikTok-specific code; `RepostPayload`
-    replaced `TikTokPayload` (JSON keys unchanged); `DeferredInstagram`
-    added; `INSTAGRAM_PROXY` / `INSTAGRAM_COOKIES` validated at startup.
-  - Audit fixes: links are normalised to `https://www.instagram.com`
-    before they reach the downloader; a permanent 4xx on the `/flush` path
-    reports once and drops the job instead of re-downloading it for the
-    rest of the TTL (both reposters); the sentinel is service-neutral.
-  - `Dockerfile`: `YT_DLP_VERSION` 2026.03.17 -> **2026.07.04**
-    (sha256 `6bbb3d31...` from the release's `SHA2-256SUMS`).
-- **Verified.** `gofmt`, `go vet`, `go build`, `go test ./... -count=1`
-  all green, including the new `-race` checks for the slot dispatch and the
-  URL normalisation; `docs/llm/validate.sh` 0 errors / 0 warnings.
-  Live permalink `instagram.com/reel/Ddo2_g3MIEN/` through this pipeline:
-  2026.03.17 queued the job and sent nothing, 2026.07.04 and 2026.08.19
-  both fetched the same 2396150-byte file and completed the repost.
+- **Birthday greetings implemented, not deployed.** `BIRTHDAY_ENABLED`
+  defaults to `false`.
+- Source: `ChatFullInfo.birthdate` read through `getChat`. The bot
+  stores no birth date; it reads the day and month during the daily
+  check and discards them.
+- Schedule: daily at 10:00 Europe/Moscow (UTC+3), with one startup
+  catch-up between 10:00 and 20:00 Moscow if the bot was down at the
+  slot.
+- Delivery: one public message per chat; several birthdays are listed
+  together, more than 10 mentions are split. The mention is
+  `<a href="tg://user?id=...">Name</a>` with the name HTML-escaped.
+  The birthday member is the only ping - the sanctioned exception to
+  the no-third-party-ping rule.
+- 29 February is greeted on 28 February in a non-leap year.
+- `birthday_greeted` stores `bg:<absChat>:<YYYY-MM-DD>:<userID>` with
+  an 8-byte timestamp, 48h TTL. The marker is written before the send
+  and cleared on failure; a crash loses one greeting, never duplicates
+  it. `MigrateChatID` rekeys the bucket.
+- Import-only `FirstName` is refused: it is the exporting account's
+  private address-book label. The fallback mention text is
+  "именинник".
+- Tests: `internal/domain/birthday/service_test.go` and
+  `internal/storage/birthday_repo_test.go`.
+- **Verified.** `go build ./...` clean; `go vet ./...` clean;
+  `gofmt -l internal/ cmd/` empty; `go test ./...` reports 22 packages
+  ok and 3 with no tests; `bash docs/llm/validate.sh` reports 0 errors
+  (3 warnings for the uncommitted birthday paths, 30 pre-existing
+  stale specs).
 
 ## 2. Negatives (what does NOT exist / is not proven)
 
-- **The Telegram upload of a real reel is unmeasured.** The container
-  reached Instagram anonymously and downloaded the file, so the download
-  half is proven in production; posting a link into a chat and watching the
-  repost plus the deletion is still an owner step.
-- **Login-walled and rate-limited answers stay retryable** (a login failure
-  sentence is not a permanent marker), so such a link sits in the queue for
-  48h. Deliberate: `/flush` retries with the same cookies.
-- **No mirror fallback**; carousels and photo posts are declined rather than
-  assembled.
-- **`tryTikTokExport` has no test** - the tikwm mirror call is not a seam.
-- **No cookie jar is mounted**, and the container mounts only `./env` plus
-  the `bidlobot-data` volume: `INSTAGRAM_COOKIES` must point under
-  `/var/lib/bidlobot/` or the deployment needs a bind mount.
-- **29 stale specs** by `validate.sh` (was 26). Three are new because
-  today's commits touch `routes.go`, `app.go`, `deferred.go` and
-  `deferred_repo.go`, which `30_stats.md`, `50_telegram.md` and
-  `45_summarize.md` list in `touches`; their content still matches the
-  code, so the dates were left alone.
+- No live proof that `getChat` returns `birthdate` for a member of a
+  common group who never started the bot. The first test-chat run must
+  confirm it.
+- Telegram may withhold the date under privacy settings; such a member
+  is skipped.
+- Coverage is observed members only. Bot API has no member
+  enumeration; a member who never wrote, reacted, or changed status
+  after installation cannot be greeted.
+- No opt-out command. Hiding the date in the Telegram profile is the
+  only per-user control.
+- Not deployed; production still runs the previous build without the
+  feature.
 
 ## 3. Queue
 
-- Post-deploy: send one Instagram reel into a production chat and confirm
-  the repost plus the deletion. The download half is already verified inside
-  the container (`yt-dlp --version` = 2026.07.04, 2396150-byte anonymous
-  fetch, the new symbols present in the running binary).
-- `INSTAGRAM_PROXY` / `INSTAGRAM_COOKIES` stay unset: the anonymous download
-  works from the production egress too. Revisit only if Instagram starts
-  login-walling this deployment.
-- Give `tryTikTokExport` a seam (`downloadTikTok` as a var) so the flush
-  policy is covered for both reposters, or drop the duplicate Instagram
-  coverage instead.
-- Roll the stale specs forward, or record why not.
+- Deploy the new master (owner gate).
+- Enable `BIRTHDAY_ENABLED=1` in one test chat first. Confirm one live
+  greeting and no duplicate after a restart.
+- If `getChat` returns no `birthdate` for a known birthday member, stop
+  and report: the source is unavailable in that setup.
+- Then enable the remaining chats.
 
 ## 4. Read order
 
-1. `docs/llm/61_instagram_repost.md` - detection, pipeline, failure classes,
-   egress, live verification table.
-2. `docs/llm/devlog/13_instagram_repost_audit.md` - what the audit found,
-   what was fixed, how the pin was chosen.
-3. `internal/bot/repost_common.go` - the shared pipeline.
-4. `internal/bot/instagram_repost.go` - Instagram-only parts.
-5. `docs/llm/60_architecture.md` ("Failure handling", "Deferred queue") and
-   `docs/llm/70_deployment.md` (env table, yt-dlp pin) before touching
-   wiring.
+1. `docs/llm/66_birthdays.md` - source, schedule, markers, privacy,
+   limits.
+2. `internal/domain/birthday/service.go` - daily service, matching,
+   message assembly.
+3. `internal/storage/birthday_repo.go` - marker bucket and prune.
+4. `docs/llm/60_architecture.md` - bucket, worker, and failure tables.
 
 ## 5. Smoke test (run before touching anything)
 
 ```sh
-go build ./... && go vet ./... && gofmt -l internal/ cmd/
-go test ./...                 # expect all ok
-bash docs/llm/validate.sh     # expect 0 errors
+go build ./... && go vet ./...
+gofmt -l internal/ cmd/
+go test ./...
+bash docs/llm/validate.sh
 ```
 
 ## 6. Agent errors
 
-- **The brief was "review the diff and the implementation".** The first
-  answer was that review, but the next turns drifted into documentation
-  edits and deployment questions, and the user had to repeat the request
-  three times before the implementation fix (the host normalisation) was
-  found. Review the implementation first; docs afterwards.
-- **An inherited claim was repeated as fact.** Devlog 12 said
-  `cmd/bidlobot` config tests covered the proxy allowlist; no such test
-  exists. Check a coverage claim before repeating it.
-- **A probe failed for the probe's own reason.** The first end-to-end
-  sandbox run reported three attempts and no video; the cause was the
-  stub script's shell pattern, not the product. Debug the harness before
-  reporting a defect.
-- **A doc edit was sloppy**: a devlog sentence was first written as
-  "so `/flush` does not re-download it to the TTL" and caught only on
-  re-reading.
+- Jev plan review refused the plan three times and released it as an
+  OPEN item; no approval was recorded. The implementation proceeded
+  under the owner's explicit "приступай к реализации" after the
+  release. Do not treat the plan as approved.
